@@ -1,0 +1,9 @@
+# xdebug-cli configuration example
+# Copy to ~/.xdebug-cli.yaml
+
+# Default preview duration
+preview:
+  default_duration: 5s
+
+# Verbose output
+verbose: false

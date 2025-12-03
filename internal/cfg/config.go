@@ -1,0 +1,28 @@
+package cfg
+
+// Version is the current version of the xdebug-cli application
+const Version = "1.0.0"
+
+// CLIParameter contains the command-line parameters for the Xdebug CLI
+type CLIParameter struct {
+	// Host is the address to listen on for Xdebug connections
+	Host string
+
+	// Port is the port number to listen on for Xdebug connections
+	Port int
+
+	// Trigger is the IDE key/trigger value for Xdebug sessions
+	Trigger string
+
+	// Commands is the list of commands to execute
+	Commands []string
+
+	// JSON enables JSON output format
+	JSON bool
+
+	// KillAll enables killing all daemon sessions
+	KillAll bool
+
+	// Force skips confirmation prompts
+	Force bool
+}

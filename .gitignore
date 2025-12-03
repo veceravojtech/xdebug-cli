@@ -1,0 +1,19 @@
+# Binaries
+xdebug-cli
+*.exe
+
+# Go build cache
+/vendor/
+*.test
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Config files with secrets
+.xdebug-cli.yaml
+
+# OS files
+.DS_Store
+Thumbs.db
