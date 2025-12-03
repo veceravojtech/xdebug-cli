@@ -66,13 +66,13 @@ func (e *CommandExecutor) ExecuteCommands(commands []string, jsonOutput bool) []
 // executeCommand executes a single command and returns the result
 func (e *CommandExecutor) executeCommand(command string, args []string) ipc.CommandResult {
 	switch command {
-	case "run", "r":
+	case "run", "r", "continue", "cont":
 		return e.handleRun()
-	case "step", "s":
+	case "step", "s", "into", "step_into":
 		return e.handleStep()
-	case "next", "n":
+	case "next", "n", "over":
 		return e.handleNext()
-	case "out", "o":
+	case "out", "o", "step_out":
 		return e.handleStepOut()
 	case "break", "b":
 		return e.handleBreak(args)
@@ -98,8 +98,14 @@ func (e *CommandExecutor) executeCommand(command string, args []string) ipc.Comm
 		return e.handleSet(args)
 	case "source", "src":
 		return e.handleSource(args)
-	case "delete", "del":
+	case "delete", "del", "breakpoint_remove":
 		return e.handleDelete(args)
+	case "breakpoint_list":
+		return e.handleInfo([]string{"breakpoints"})
+	case "property_get":
+		return e.handlePropertyGet(args)
+	case "clear":
+		return e.handleClear(args)
 	case "disable":
 		return e.handleDisable(args)
 	case "enable":
@@ -788,14 +794,24 @@ func (e *CommandExecutor) handleHelp(args []string) ipc.CommandResult {
 	helpText := fmt.Sprintf(`xdebug-cli version %s
 
 Available commands:
-  run, r              Continue execution
-  step, s             Step into
-  next, n             Step over
+  run, r              Continue execution (aliases: continue, cont)
+  step, s             Step into (aliases: into, step_into)
+  next, n             Step over (alias: over)
+  out, o              Step out (alias: step_out)
   break, b <target>   Set breakpoint
+  delete, del <id>    Delete breakpoint by ID (alias: breakpoint_remove)
+  clear <location>    Delete breakpoint by location (GDB-style)
   print, p <var>      Print variable value
+  property_get -n $v  Print variable (DBGp-style)
   context, c [type]   Show variables (local/global/constant)
   list, l             Show source code
   info, i [topic]     Show info (breakpoints)
+  breakpoint_list     List breakpoints (DBGp-style)
+  status, st          Show current execution status
+  stack               Show call stack
+  eval, e <expr>      Evaluate PHP expression
+  set $var = value    Set variable value
+  detach, d           Detach from debug session
   finish, f           Stop debugging
   help, h, ?          Show help
 
@@ -1221,5 +1237,147 @@ func (e *CommandExecutor) handleStack() ipc.CommandResult {
 		Command: "stack",
 		Success: true,
 		Result:  stackFrames,
+	}
+}
+
+// handlePropertyGet handles DBGp-style property_get command
+// Syntax: property_get -n <varname>
+func (e *CommandExecutor) handlePropertyGet(args []string) ipc.CommandResult {
+	// Parse -n flag
+	var varName string
+	for i := 0; i < len(args); i++ {
+		if args[i] == "-n" {
+			if i+1 < len(args) {
+				varName = args[i+1]
+				break
+			}
+		}
+	}
+
+	if varName == "" {
+		return ipc.CommandResult{
+			Command: "property_get",
+			Success: false,
+			Error:   "Usage: property_get -n <variable>",
+		}
+	}
+
+	// Delegate to handlePrint with the variable name
+	result := e.handlePrint([]string{varName})
+	// Update command name to reflect the alias used
+	result.Command = "property_get"
+	return result
+}
+
+// handleClear removes breakpoint(s) by location (GDB-style)
+// Syntax: clear :line or clear file:line
+func (e *CommandExecutor) handleClear(args []string) ipc.CommandResult {
+	if len(args) == 0 {
+		return ipc.CommandResult{
+			Command: "clear",
+			Success: false,
+			Error:   "Usage: clear <:line> or clear <file:line>",
+		}
+	}
+
+	location := args[0]
+
+	// Parse location to get file and line
+	var file string
+	var line int
+
+	if strings.HasPrefix(location, ":") {
+		// :line format - use current file
+		lineStr := strings.TrimPrefix(location, ":")
+		parsedLine, err := strconv.Atoi(lineStr)
+		if err != nil {
+			return ipc.CommandResult{
+				Command: "clear",
+				Success: false,
+				Error:   fmt.Sprintf("Invalid line number: %s", lineStr),
+			}
+		}
+		line = parsedLine
+		file, _ = e.client.GetSession().GetCurrentLocation()
+		if file == "" {
+			return ipc.CommandResult{
+				Command: "clear",
+				Success: false,
+				Error:   "No current file. Use format: clear <file>:<line>",
+			}
+		}
+	} else if strings.Contains(location, ":") {
+		// file:line format
+		parts := strings.SplitN(location, ":", 2)
+		file = parts[0]
+		parsedLine, err := strconv.Atoi(parts[1])
+		if err != nil {
+			return ipc.CommandResult{
+				Command: "clear",
+				Success: false,
+				Error:   fmt.Sprintf("Invalid line number: %s", parts[1]),
+			}
+		}
+		line = parsedLine
+	} else {
+		return ipc.CommandResult{
+			Command: "clear",
+			Success: false,
+			Error:   "Usage: clear <:line> or clear <file:line>",
+		}
+	}
+
+	// Get all breakpoints
+	response, err := e.client.GetBreakpointList()
+	if err != nil {
+		return ipc.CommandResult{
+			Command: "clear",
+			Success: false,
+			Error:   err.Error(),
+		}
+	}
+
+	if response.HasError() {
+		return ipc.CommandResult{
+			Command: "clear",
+			Success: false,
+			Error:   response.GetErrorMessage(),
+		}
+	}
+
+	// Find and remove breakpoints at the specified location
+	var removedCount int
+	var removedIDs []string
+	for _, bp := range response.Breakpoints {
+		bpLine, _ := strconv.Atoi(bp.Lineno)
+		// Match by file (check if bp.Filename ends with our file, or matches exactly)
+		fileMatches := bp.Filename == file ||
+			strings.HasSuffix(bp.Filename, "/"+file) ||
+			strings.HasSuffix(bp.Filename, "file://"+file)
+		if fileMatches && bpLine == line {
+			removeResp, err := e.client.RemoveBreakpoint(bp.ID)
+			if err == nil && !removeResp.HasError() {
+				removedCount++
+				removedIDs = append(removedIDs, bp.ID)
+			}
+		}
+	}
+
+	if removedCount == 0 {
+		return ipc.CommandResult{
+			Command: "clear",
+			Success: false,
+			Error:   fmt.Sprintf("No breakpoint found at %s:%d", file, line),
+		}
+	}
+
+	return ipc.CommandResult{
+		Command: "clear",
+		Success: true,
+		Result: map[string]interface{}{
+			"location":    fmt.Sprintf("%s:%d", file, line),
+			"removed_ids": removedIDs,
+			"count":       removedCount,
+		},
 	}
 }

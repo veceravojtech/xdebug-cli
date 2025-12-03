@@ -6,29 +6,32 @@ import "fmt"
 func (v *View) ShowHelpMessage() {
 	help := `
 Available Commands:
-  run, r          Continue execution to next breakpoint
-  step, s         Step into next statement (enter functions)
-  next, n         Step over next statement (skip functions)
-  out, o          Step out of current function (return to caller)
+  run, r          Continue execution (aliases: continue, cont)
+  step, s         Step into (aliases: into, step_into)
+  next, n         Step over (alias: over)
+  out, o          Step out (alias: step_out)
   finish, f       Stop the debugging session
   break, b        Set a breakpoint (see 'help break' for details)
+  clear           Delete breakpoint by location (GDB-style)
   print, p        Print variable value (see 'help print' for details)
+  property_get    Print variable (DBGp-style: property_get -n $var)
   context, c      Show variables in current context (see 'help context' for details)
   list, l         Show source code around current line
   info, i         Show debugging information (see 'help info' for details)
+  breakpoint_list List breakpoints (DBGp-style)
   status, st      Show current execution status
   detach, d       Detach from debug session
   eval, e         Evaluate PHP expression (see 'help eval' for details)
   set             Set variable value (see 'help set' for details)
   source          Display source code (see 'help source' for details)
   stack           Show call stack trace
-  delete, del     Delete breakpoint by ID (see 'help delete' for details)
+  delete, del     Delete breakpoint by ID (alias: breakpoint_remove)
   disable         Disable breakpoint by ID (see 'help disable' for details)
   enable          Enable breakpoint by ID (see 'help enable' for details)
   help, h, ?      Show this help message or help for specific command
 
-For detailed help on a specific command, use: xdebug-cli listen --commands "help <command>"
-Examples: xdebug-cli listen --commands "help break"
+For detailed help on a specific command, use: xdebug-cli attach --commands "help <command>"
+Examples: xdebug-cli attach --commands "help break"
 `
 	v.PrintLn(help)
 }
@@ -55,9 +58,9 @@ func (v *View) ShowStepHelpMessage() {
 step/next/out - Control execution flow
 
 Commands:
-  step, s    Step into next statement (enters function calls)
-  next, n    Step over next statement (executes functions without stepping through)
-  out, o     Step out of current function (returns to caller)
+  step, s    Step into next statement (aliases: into, step_into)
+  next, n    Step over next statement (alias: over)
+  out, o     Step out of current function (alias: step_out)
 
 Usage:
   step       Execute one statement, entering any functions
@@ -383,9 +386,9 @@ Arguments:
   <id>            Breakpoint ID (shown in 'info breakpoints')
 
 Examples:
-  xdebug-cli listen --commands "info breakpoints"     # See breakpoint IDs
-  xdebug-cli listen --commands "disable 1"            # Disable breakpoint 1
-  xdebug-cli listen --commands "enable 1"             # Re-enable breakpoint 1
+  xdebug-cli attach --commands "info breakpoints"     # See breakpoint IDs
+  xdebug-cli attach --commands "disable 1"            # Disable breakpoint 1
+  xdebug-cli attach --commands "enable 1"             # Re-enable breakpoint 1
 
 The enable command:
   - Re-activates a disabled breakpoint
@@ -396,20 +399,77 @@ The enable command:
 	v.PrintLn(help)
 }
 
+// ShowClearHelpMessage displays help for the clear command.
+func (v *View) ShowClearHelpMessage() {
+	help := `
+clear - Delete breakpoint by location (GDB-style)
+
+Usage:
+  clear :<line>           Delete breakpoint at line in current file
+  clear <file>:<line>     Delete breakpoint at specific location
+
+Arguments:
+  <line>         Line number
+  <file>         File path
+
+Examples:
+  xdebug-cli attach --commands "clear :42"            # Clear breakpoint at line 42
+  xdebug-cli attach --commands "clear app.php:100"    # Clear breakpoint at file:line
+
+The clear command:
+  - Removes breakpoints by location instead of ID
+  - Removes all breakpoints at the specified location
+  - Use 'delete <id>' to remove by breakpoint ID
+  - Use 'info breakpoints' to list current breakpoints
+`
+	v.PrintLn(help)
+}
+
+// ShowRunHelpMessage displays help for the run command.
+func (v *View) ShowRunHelpMessage() {
+	help := `
+run - Continue execution
+
+Usage:
+  run                 Continue execution to next breakpoint
+
+Aliases:
+  r                   Short form
+  continue            GDB-style alias
+  cont                GDB-style alias (abbreviated)
+
+Examples:
+  xdebug-cli attach --commands "run"
+  xdebug-cli attach --commands "continue"
+  xdebug-cli attach --commands "r"
+
+The run command:
+  - Resumes script execution
+  - Stops at the next breakpoint
+  - Stops when script completes
+  - Use 'step' or 'next' for line-by-line execution
+`
+	v.PrintLn(help)
+}
+
 // ShowCommandHelp displays help for a specific command.
 // This is a convenience method that routes to the appropriate help function.
 func (v *View) ShowCommandHelp(command string) {
 	switch command {
-	case "info", "i":
+	case "info", "i", "breakpoint_list":
 		v.ShowInfoHelpMessage()
-	case "step", "s", "next", "n", "out", "o":
+	case "step", "s", "next", "n", "out", "o", "into", "step_into", "over", "step_out":
 		v.ShowStepHelpMessage()
 	case "break", "b", "breakpoint":
 		v.ShowBreakpointHelpMessage()
-	case "print", "p":
+	case "clear":
+		v.ShowClearHelpMessage()
+	case "print", "p", "property_get":
 		v.ShowPrintHelpMessage()
 	case "context", "c":
 		v.ShowContextHelpMessage()
+	case "run", "r", "continue", "cont":
+		v.ShowRunHelpMessage()
 	case "status", "st":
 		v.ShowStatusHelpMessage()
 	case "detach", "d":
@@ -422,7 +482,7 @@ func (v *View) ShowCommandHelp(command string) {
 		v.ShowSourceHelpMessage()
 	case "stack":
 		v.ShowStackHelpMessage()
-	case "delete", "del":
+	case "delete", "del", "breakpoint_remove":
 		v.ShowDeleteHelpMessage()
 	case "disable":
 		v.ShowDisableHelpMessage()

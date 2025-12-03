@@ -20,30 +20,26 @@ Keep this managed block so 'openspec update' can refresh the instructions.
 
 ## Features
 * DBGp protocol client for PHP debugging with Xdebug
-* Interactive REPL debugging session
-* Non-interactive commands for scripting
-* Daemon mode for persistent debug sessions (multi-step workflows)
+* Daemon-based persistent debug sessions for multi-step workflows
 * TCP server for accepting Xdebug connections
 * Full debugging operations: run, step (into/over/out), breakpoints, variable inspection
 * Conditional breakpoints with PHP expressions
 * Multiple breakpoints in single command
 * Source code display with line numbers
+* JSON output mode for automation and scripting
 * TDD with comprehensive test coverage
 * Install command (`xdebug-cli install`) installs CLI to `~/.local/bin` with build timestamp
 
 ## Available Commands
 
 ```bash
-xdebug-cli listen --commands "cmd1" "cmd2"               # Execute debugging commands
-xdebug-cli listen --commands "cmd1" --force              # Kill existing daemon, run commands
-xdebug-cli listen --json --commands "run"                # JSON output for automation
-xdebug-cli daemon start --commands "break file.php:100"    # Start persistent daemon session
-xdebug-cli attach --commands "context local" "print \$var"    # Attach to daemon and execute commands
-xdebug-cli connection                                    # Show connection status
-xdebug-cli connection list [--json]                      # List all daemon sessions
-xdebug-cli connection isAlive                            # Check if session active (exit 0/1)
-xdebug-cli connection kill                               # Terminate active session
-xdebug-cli connection kill --all [--force]               # Terminate all daemon sessions
+xdebug-cli daemon start --curl "<curl-args>" [--commands "cmd1" "cmd2"]  # Start daemon with HTTP trigger
+xdebug-cli attach --commands "context local" "print \$var"  # Execute commands on daemon session
+xdebug-cli daemon status                                 # Show daemon status
+xdebug-cli daemon list [--json]                          # List all daemon sessions
+xdebug-cli daemon isAlive                                # Check if daemon active (exit 0/1)
+xdebug-cli daemon kill                                   # Terminate active daemon
+xdebug-cli daemon kill --all [--force]                   # Terminate all daemon sessions
 xdebug-cli install                                       # Install binary to ~/.local/bin
 xdebug-cli version                                       # Show version and build timestamp
 ```
@@ -53,15 +49,17 @@ xdebug-cli version                                       # Show version and buil
 Available commands for use with `--commands` flag:
 
 ```
-run, r              # Continue execution
-step, s             # Step into
-next, n             # Step over
-out, o              # Step out of current function
+run, r              # Continue execution (aliases: continue, cont)
+step, s             # Step into (aliases: into, step_into)
+next, n             # Step over (alias: over)
+out, o              # Step out of current function (alias: step_out)
 break, b <target>   # Set breakpoint (:line, file:line, call func, exception)
-delete, del <id>    # Delete breakpoint by ID
+delete, del <id>    # Delete breakpoint by ID (alias: breakpoint_remove)
+clear <location>    # Delete breakpoint by location (GDB-style)
 disable <id>        # Disable breakpoint by ID
 enable <id>         # Enable breakpoint by ID
 print, p <var>      # Print variable value
+property_get -n $v  # Print variable (DBGp-style)
 set $var = value    # Set variable value
 eval, e <expr>      # Evaluate PHP expression
 context, c [type]   # Show variables (local/global/constant)
@@ -70,9 +68,37 @@ source, src [file]  # Display source code (alternative to list)
 stack               # Show call stack
 status, st          # Show current execution status
 info, i [topic]     # Show info (breakpoints)
+breakpoint_list     # List breakpoints (DBGp-style)
 detach, d           # Detach from debug session
 finish, f           # Stop debugging
 help, h, ?          # Show help
+```
+
+### Command Aliases
+
+xdebug-cli supports multiple naming conventions for commands, making it easier for users familiar with other debuggers:
+
+**GDB-style aliases:**
+```bash
+continue            # Same as 'run' - continue execution
+cont                # Same as 'run' - continue execution (abbreviated)
+clear :42           # Delete breakpoint at line 42 (by location, not ID)
+clear file.php:100  # Delete breakpoint at specific location
+```
+
+**DBGp protocol-style aliases:**
+```bash
+property_get -n \$var    # Same as 'print $var'
+breakpoint_list          # Same as 'info breakpoints'
+breakpoint_remove <id>   # Same as 'delete <id>'
+```
+
+**Alternative stepping commands:**
+```bash
+into                # Same as 'step' - step into function
+step_into           # Same as 'step' - step into function
+over                # Same as 'next' - step over function call
+step_out            # Same as 'out' - step out of current function
 ```
 
 ### Breakpoint Syntax
@@ -103,7 +129,7 @@ Manage breakpoints during debugging sessions:
 
 ```bash
 # List all breakpoints
-xdebug-cli listen --commands "info breakpoints"
+xdebug-cli attach --commands "info breakpoints"
 
 # Delete breakpoint by ID
 xdebug-cli attach --commands "delete 1"
@@ -122,7 +148,7 @@ Control program execution and inspect current state:
 
 ```bash
 # Show current execution status
-xdebug-cli listen --commands "status"
+xdebug-cli attach --commands "status"
 xdebug-cli attach --commands "st"
 
 # Show call stack
@@ -156,7 +182,7 @@ Display and navigate source code:
 
 ```bash
 # Show source code (basic)
-xdebug-cli listen --commands "list"
+xdebug-cli attach --commands "list"
 xdebug-cli attach --commands "l"
 
 # Show specific file source
@@ -168,68 +194,67 @@ xdebug-cli attach --commands "source app.php:100-120"
 xdebug-cli attach --commands "list :50-:75"
 ```
 
-## Command-Based Execution
+## Daemon Workflow
 
-Execute debugging commands for scripting, automation, and CI/CD:
+All debugging in xdebug-cli uses a daemon-based workflow. The daemon runs in the background and maintains your debug session, allowing you to execute commands across multiple CLI invocations.
 
 ### Basic Usage
 
-```bash
-# Run a single command
-xdebug-cli listen --commands "run"
-
-# Execute multiple commands sequentially
-xdebug-cli listen --commands "run" "step" "print \$x"
-
-# Set breakpoint and continue
-xdebug-cli listen --commands "break :42" "run" "context local"
-```
-
-### Force Flag
-
-Use `--force` to automatically kill any existing daemon on the same port before starting:
+The `--curl` flag is **required** and triggers the HTTP request automatically with the XDEBUG_TRIGGER cookie:
 
 ```bash
-# Kill stale daemon on port 9003, then run commands
-xdebug-cli listen --force --commands "run" "print \$x"
+# 1. Start daemon with curl trigger (single command - no race conditions!)
+xdebug-cli daemon start --curl "http://localhost/app.php"
 
-# With custom port
-xdebug-cli listen -p 9004 --force --commands "break :42" "run"
-```
+# 2. Execute debugging commands via attach
+xdebug-cli attach --commands "run"
+xdebug-cli attach --commands "step" "print \$x"
+xdebug-cli attach --commands "context local"
 
-The `--force` flag:
-- Kills only the daemon on the same port (e.g., port 9003)
-- Shows warning if no daemon exists, but continues
-- Never fails - always proceeds with the new session
-- Useful for automation scripts and CI/CD where stale processes may exist
-
-**Output Examples:**
-
-Daemon killed successfully:
-```
-Killed daemon on port 9003 (PID 12345)
-Server listening on 0.0.0.0:9003
+# 3. Stop the daemon when done
+xdebug-cli daemon kill
 ```
 
-No daemon running:
-```
-Warning: no daemon running on port 9003
-Server listening on 0.0.0.0:9003
+### Starting with Breakpoints
+
+Set breakpoints when starting the daemon:
+
+```bash
+# Start daemon with breakpoint
+xdebug-cli daemon start --curl "http://localhost/app.php" --commands "break /path/file.php:100"
+
+# Start daemon with multiple breakpoints
+xdebug-cli daemon start --curl "http://localhost/app.php" --commands "break :42" "break :100"
+
+# Commands execute when the Xdebug connection is established
 ```
 
-Stale daemon (process already dead):
+### Complex HTTP Requests
+
+The `--curl` flag supports all curl arguments:
+
+```bash
+# POST request with data
+xdebug-cli daemon start --curl "http://localhost/api -X POST -d 'name=value'"
+
+# POST with JSON payload
+xdebug-cli daemon start --curl "http://localhost/api -X POST -H 'Content-Type: application/json' -d '{\"key\":\"value\"}'"
+
+# With custom headers
+xdebug-cli daemon start --curl "http://localhost/api -H 'Authorization: Bearer token'"
 ```
-Warning: daemon on port 9003 is stale (PID 12345 no longer exists), cleaning up
-Server listening on 0.0.0.0:9003
-```
+
+The XDEBUG_TRIGGER cookie is automatically appended to all requests.
+
+The daemon automatically kills any existing daemon on the same port before starting, so you never need to worry about stale processes.
 
 ### JSON Output Mode
 
-Enable JSON output for machine parsing and LLM consumption:
+Enable JSON output for machine parsing and automation:
 
 ```bash
 # Get structured JSON output
-xdebug-cli listen --json --commands "run" "print \$myVar"
+xdebug-cli attach --json --commands "run" "print \$myVar"
 
 # Example JSON output for run command:
 # {"command":"run","success":true,"result":{"status":"break","filename":"/path/to/file.php","line":42}}
@@ -245,13 +270,19 @@ xdebug-cli listen --json --commands "run" "print \$myVar"
 
 ```bash
 # CI/CD debugging script
-xdebug-cli listen --json --commands "run" "context local" > debug-output.json
+xdebug-cli daemon start --curl "http://localhost/test.php" --commands "break /app/test.php:50"
+xdebug-cli attach --json --commands "context local" > debug-output.json
+xdebug-cli daemon kill
 
-# Check variable value in test
-xdebug-cli listen --json --commands "run" "print \$result" | jq '.result.value'
+# Check variable value
+xdebug-cli daemon start --curl "http://localhost/app.php"
+xdebug-cli attach --json --commands "run" "print \$result" | jq '.result.value'
+xdebug-cli daemon kill
 
-# Set breakpoint and inspect
-xdebug-cli listen --commands "break :100" "run" "context local" "finish"
+# Automated debugging workflow
+xdebug-cli daemon start --curl "http://localhost/api" --commands "break :100"
+xdebug-cli attach --commands "context local" "run"
+xdebug-cli daemon kill
 ```
 
 ### Shell Escaping
@@ -260,13 +291,16 @@ When using special characters in commands, ensure proper shell escaping:
 
 ```bash
 # Escape dollar signs in variable names
-xdebug-cli listen --commands "print \$myVar"
+xdebug-cli attach --commands "print \$myVar"
 
 # Use quotes for complex expressions
-xdebug-cli listen --commands "print \$obj->property"
+xdebug-cli attach --commands "print \$obj->property"
 
 # File paths with spaces (use quotes)
-xdebug-cli listen --commands "break /path/with spaces/file.php:42"
+xdebug-cli daemon start --curl "http://localhost/app.php" --commands "break /path/with spaces/file.php:42"
+
+# Complex curl arguments with JSON
+xdebug-cli daemon start --curl "http://localhost/api -X POST -d '{\"key\":\"value\"}'"
 ```
 
 ### Exit Codes
@@ -274,56 +308,11 @@ xdebug-cli listen --commands "break /path/with spaces/file.php:42"
 - `0`: All commands executed successfully
 - `1`: Command execution failed or session ended prematurely
 
-## Daemon Mode (Persistent Sessions)
-
-Start a persistent debugging session that runs in the background, allowing multiple CLI invocations to interact with the same debug session without terminating the connection.
-
-### Starting a Daemon
-
-```bash
-# Start daemon (waits for Xdebug connection in background)
-xdebug-cli daemon start
-
-# Start daemon with initial breakpoint
-xdebug-cli daemon start --commands "break /path/to/file.php:100"
-
-# Start daemon with JSON output
-xdebug-cli daemon start --json --commands "break :42"
-
-# Kill old daemon and start fresh
-xdebug-cli daemon start --commands "break :42"
-```
-
-The daemon:
-- Runs in the background (detaches from terminal)
-- Keeps the debug connection alive across multiple `attach` commands
-- Persists until explicitly killed or the debug session ends
-- Creates a Unix socket for IPC communication
-- Registers its PID and socket path for discovery
-
-### Attaching to a Daemon
-
-Once a daemon is running, attach to it to execute commands:
-
-```bash
-# Trigger PHP request (connects to daemon, hits breakpoint)
-curl http://localhost/app.php -b "XDEBUG_TRIGGER=1"
-
-# Inspect variables
-xdebug-cli attach --commands "context local" "print \$myVar"
-
-# Continue execution
-xdebug-cli attach --commands "run"
-
-# Get JSON output for automation
-xdebug-cli attach --json --commands "context local"
-```
-
-### Managing Daemon Sessions
+## Managing Daemon Sessions
 
 ```bash
 # Check daemon status
-xdebug-cli connection
+xdebug-cli daemon status
 
 # Example output:
 # Connection Status: Daemon Mode
@@ -334,7 +323,7 @@ xdebug-cli connection
 # Started: 2025-12-02 10:30:15
 
 # List all daemon sessions
-xdebug-cli connection list
+xdebug-cli daemon list
 
 # Example output:
 # Active Daemon Sessions:
@@ -346,7 +335,7 @@ xdebug-cli connection list
 # 2 session(s) found
 
 # List all sessions in JSON format
-xdebug-cli connection list --json
+xdebug-cli daemon list --json
 
 # Example JSON output:
 # [
@@ -355,13 +344,13 @@ xdebug-cli connection list --json
 # ]
 
 # Check if daemon is alive (exit code 0 if running, 1 if not)
-xdebug-cli connection isAlive
+xdebug-cli daemon isAlive
 
 # Kill daemon on current port
-xdebug-cli connection kill
+xdebug-cli daemon kill
 
 # Kill all daemon sessions (with confirmation)
-xdebug-cli connection kill --all
+xdebug-cli daemon kill --all
 
 # Example output:
 # Found 2 active session(s). Terminate all? (y/N): y
@@ -371,7 +360,7 @@ xdebug-cli connection kill --all
 # All 2 session(s) terminated successfully.
 
 # Kill all daemon sessions (skip confirmation)
-xdebug-cli connection kill --all --force
+xdebug-cli daemon kill --all --force
 ```
 
 ### Workflow Examples
@@ -379,30 +368,24 @@ xdebug-cli connection kill --all --force
 #### Workflow 1: Set breakpoint, trigger request, inspect
 
 ```bash
-# 1. Start daemon and set breakpoint (CLI exits, daemon stays)
-xdebug-cli daemon start --commands "break /var/www/app.php:100"
+# 1. Start daemon with curl trigger and breakpoint (single command!)
+xdebug-cli daemon start --curl "http://localhost/app.php" --commands "break /var/www/app.php:100"
 
-# 2. Trigger PHP request (connects to daemon, hits breakpoint, stays paused)
-curl http://localhost/app.php -b "XDEBUG_TRIGGER=1"
-
-# 3. Inspect state (attaches to existing session)
+# 2. Inspect state (attaches to existing session after breakpoint hit)
 xdebug-cli attach --commands "context local" "print \$user"
 
-# 4. Continue execution
+# 3. Continue execution
 xdebug-cli attach --commands "run"
 
-# 5. Kill session when done
-xdebug-cli connection kill
+# 4. Kill session when done
+xdebug-cli daemon kill
 ```
 
 #### Workflow 2: Incremental debugging
 
 ```bash
-# Start daemon
-xdebug-cli daemon start
-
-# Trigger request
-curl http://localhost/app.php -b "XDEBUG_TRIGGER=1"
+# Start daemon with curl trigger
+xdebug-cli daemon start --curl "http://localhost/app.php"
 
 # Multiple commands across separate invocations
 xdebug-cli attach --commands "break :42"
@@ -416,11 +399,8 @@ xdebug-cli attach --commands "finish"
 
 ```bash
 #!/bin/bash
-# Start daemon in background
-xdebug-cli daemon start --commands "break /app/critical.php:50"
-
-# Run tests (triggers Xdebug connections)
-php vendor/bin/phpunit tests/CriticalTest.php
+# Start daemon with curl trigger and breakpoint
+xdebug-cli daemon start --curl "http://localhost/test.php" --commands "break /app/critical.php:50"
 
 # Collect debug data
 xdebug-cli attach --json --commands "context local" > debug-data.json
@@ -433,37 +413,55 @@ fi
 
 # Continue or kill
 xdebug-cli attach --commands "run"
-xdebug-cli connection kill
+xdebug-cli daemon kill
 ```
 
-### Daemon Mode vs. Command-Based Execution
+## Error Messages
 
-| Feature | Daemon Mode | Command-Based Mode |
-|---------|-------------|---------------------|
-| Session Persistence | Persists across invocations | Terminates after commands |
-| Multiple Commands | Across multiple CLI calls | Single CLI invocation |
-| Background Process | Yes (detached daemon) | No (foreground process) |
-| Use Case | Multi-step workflows | One-shot command execution |
-| PHP State | Remains paused at breakpoint | Executes all commands in sequence |
+**Missing --curl flag:**
+```
+Error: --curl flag is required
 
-### Error Messages
+Usage:
+  xdebug-cli daemon start --curl "<curl-args>"
+
+Examples:
+  xdebug-cli daemon start --curl "http://localhost/app.php"
+  xdebug-cli daemon start --curl "http://localhost/api -X POST -d 'data'"
+
+The --curl flag specifies the HTTP request to trigger Xdebug.
+XDEBUG_TRIGGER cookie is added automatically.
+```
+
+**Curl failure:**
+```
+Error: curl failed with exit code 7: Could not connect to host
+Daemon terminated.
+```
+
+**Curl not found:**
+```
+Error: curl not found in PATH
+```
 
 **No daemon running:**
 ```
 Error: no daemon running on port 9003. Start with:
-  xdebug-cli daemon start
+  xdebug-cli daemon start --curl "http://localhost/app.php"
 ```
 
-**Daemon already running:**
+**Daemon already running (auto-killed by daemon start):**
+
+The daemon automatically kills any existing daemon on the same port, showing:
 ```
-Error: daemon already running on port 9003 (PID 12345)
-Use 'xdebug-cli connection kill' to terminate it first.
+Killed daemon on port 9003 (PID 12345)
+Daemon started on port 9003
 ```
 
 **Connection failed:**
 ```
 Error: failed to connect to daemon socket: /tmp/xdebug-cli-session-9003.sock
-The daemon may have crashed or ended. Check 'xdebug-cli connection' for status.
+The daemon may have crashed or ended. Check 'xdebug-cli daemon status' for status.
 ```
 
 ## Development
@@ -483,7 +481,7 @@ go test ./...
 
 ```
 cmd/xdebug-cli/main.go     # Entry point
-internal/cli/              # Cobra commands (root, listen, attach, connection, install)
+internal/cli/              # Cobra commands (root, daemon, attach, connection, install)
 internal/dbgp/             # DBGp protocol layer (server, client, session, protocol)
 internal/daemon/           # Daemon process management (fork, IPC, registry)
 internal/ipc/              # Inter-process communication (Unix sockets, protocol)

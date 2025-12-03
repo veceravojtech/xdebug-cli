@@ -74,7 +74,7 @@ func runAttachCmd() error {
 	// Send commands to daemon
 	response, err := client.SendCommands(CLIArgs.Commands, CLIArgs.JSON)
 	if err != nil {
-		return fmt.Errorf("failed to connect to daemon socket: %s\nThe daemon may have crashed or ended. Check 'xdebug-cli connection' for status.", sessionInfo.SocketPath)
+		return fmt.Errorf("failed to connect to daemon socket: %s\nThe daemon may have crashed or ended.", sessionInfo.SocketPath)
 	}
 
 	// Handle response
@@ -121,7 +121,7 @@ func displayCommandResult(v *view.View, result ipc.CommandResult) {
 	}
 
 	switch result.Command {
-	case "print", "p":
+	case "print", "p", "property_get":
 		// result.Result is a JSONProperty (or map representation of it)
 		if propMap, ok := result.Result.(map[string]interface{}); ok {
 			prop := mapToJSONProperty(propMap)
@@ -146,7 +146,7 @@ func displayCommandResult(v *view.View, result ipc.CommandResult) {
 			}
 		}
 
-	case "run", "r", "step", "s", "next", "n", "out", "o":
+	case "run", "r", "continue", "cont", "step", "s", "into", "step_into", "next", "n", "over", "out", "o", "step_out":
 		// result.Result is a map with status, filename, line
 		if stateMap, ok := result.Result.(map[string]interface{}); ok {
 			status := stateMap["status"].(string)
@@ -240,6 +240,25 @@ func displayCommandResult(v *view.View, result ipc.CommandResult) {
 			if helpText, ok := helpMap["help"].(string); ok {
 				v.PrintLn(helpText)
 			}
+		}
+
+	case "clear":
+		// result.Result is a map with location, removed_ids, and count
+		if clearMap, ok := result.Result.(map[string]interface{}); ok {
+			location := clearMap["location"].(string)
+			count := int(clearMap["count"].(float64))
+			if count == 1 {
+				v.PrintLn(fmt.Sprintf("Cleared breakpoint at %s", location))
+			} else {
+				v.PrintLn(fmt.Sprintf("Cleared %d breakpoints at %s", count, location))
+			}
+		}
+
+	case "delete", "del", "breakpoint_remove":
+		// result.Result is a map with breakpoint_id
+		if delMap, ok := result.Result.(map[string]interface{}); ok {
+			bpID := delMap["breakpoint_id"].(string)
+			v.PrintLn(fmt.Sprintf("Deleted breakpoint %s", bpID))
 		}
 	}
 }

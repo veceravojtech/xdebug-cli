@@ -113,3 +113,141 @@ func TestDaemonStartInheritsGlobalFlags(t *testing.T) {
 		t.Error("expected JSON flag to be true")
 	}
 }
+
+// TestDaemonStartCurlFlagRegistered tests that --curl flag is registered
+func TestDaemonStartCurlFlagRegistered(t *testing.T) {
+	// Test that --curl flag is registered
+	curlFlag := startCmd.Flags().Lookup("curl")
+	if curlFlag == nil {
+		t.Fatal("--curl flag should be registered")
+	}
+
+	// Test flag properties
+	if curlFlag.DefValue != "" {
+		t.Errorf("expected default value '', got '%s'", curlFlag.DefValue)
+	}
+}
+
+// TestDaemonStartCurlValidation tests that --curl flag is required
+func TestDaemonStartCurlValidation(t *testing.T) {
+	// Reset CLIArgs
+	CLIArgs = cfg.CLIParameter{
+		Port: 9003,
+		Curl: "", // Empty curl should fail validation
+	}
+
+	// runDaemonStart should return an error when --curl is empty
+	err := runDaemonStart()
+	if err == nil {
+		t.Fatal("runDaemonStart should return error when --curl is empty")
+	}
+
+	// Error message should mention --curl flag is required
+	if err.Error()[:26] != "--curl flag is required\n\nU" {
+		t.Errorf("error message should start with '--curl flag is required', got '%s'", err.Error()[:26])
+	}
+}
+
+// TestParseShellArgs tests the shell argument parser
+func TestParseShellArgs(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected []string
+		wantErr  bool
+	}{
+		{
+			name:     "simple URL",
+			input:    "http://localhost/app.php",
+			expected: []string{"http://localhost/app.php"},
+			wantErr:  false,
+		},
+		{
+			name:     "URL with flags",
+			input:    "http://localhost/api -X POST",
+			expected: []string{"http://localhost/api", "-X", "POST"},
+			wantErr:  false,
+		},
+		{
+			name:     "double quoted data",
+			input:    `http://localhost/api -X POST -d "name=value"`,
+			expected: []string{"http://localhost/api", "-X", "POST", "-d", "name=value"},
+			wantErr:  false,
+		},
+		{
+			name:     "single quoted data",
+			input:    `http://localhost/api -X POST -d 'name=value'`,
+			expected: []string{"http://localhost/api", "-X", "POST", "-d", "name=value"},
+			wantErr:  false,
+		},
+		{
+			name:     "quoted data with spaces",
+			input:    `http://localhost/api -d "hello world"`,
+			expected: []string{"http://localhost/api", "-d", "hello world"},
+			wantErr:  false,
+		},
+		{
+			name:     "multiple headers",
+			input:    `http://localhost/api -H "Content-Type: application/json" -H "Accept: text/plain"`,
+			expected: []string{"http://localhost/api", "-H", "Content-Type: application/json", "-H", "Accept: text/plain"},
+			wantErr:  false,
+		},
+		{
+			name:    "unclosed double quote",
+			input:   `http://localhost/api -d "incomplete`,
+			wantErr: true,
+		},
+		{
+			name:    "unclosed single quote",
+			input:   `http://localhost/api -d 'incomplete`,
+			wantErr: true,
+		},
+		{
+			name:     "escaped spaces",
+			input:    `http://localhost/api -d hello\ world`,
+			expected: []string{"http://localhost/api", "-d", "hello world"},
+			wantErr:  false,
+		},
+		{
+			name:     "empty string",
+			input:    "",
+			expected: []string{},
+			wantErr:  false,
+		},
+		{
+			name:     "JSON data",
+			input:    `http://localhost/api -X POST -H "Content-Type: application/json" -d '{"key":"value"}'`,
+			expected: []string{"http://localhost/api", "-X", "POST", "-H", "Content-Type: application/json", "-d", `{"key":"value"}`},
+			wantErr:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := parseShellArgs(tt.input)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("expected error but got none")
+				}
+				return
+			}
+
+			if err != nil {
+				t.Errorf("unexpected error: %v", err)
+				return
+			}
+
+			if len(result) != len(tt.expected) {
+				t.Errorf("expected %d args, got %d: %v", len(tt.expected), len(result), result)
+				return
+			}
+
+			for i, arg := range result {
+				if arg != tt.expected[i] {
+					t.Errorf("arg[%d]: expected '%s', got '%s'", i, tt.expected[i], arg)
+				}
+			}
+		})
+	}
+}

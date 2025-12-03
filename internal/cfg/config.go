@@ -25,4 +25,10 @@ type CLIParameter struct {
 
 	// Force skips confirmation prompts
 	Force bool
+
+	// Curl is the curl arguments for triggering Xdebug connections
+	Curl string
+
+	// BreakpointTimeout is the timeout in seconds for breakpoint validation (0 = disabled)
+	BreakpointTimeout int
 }

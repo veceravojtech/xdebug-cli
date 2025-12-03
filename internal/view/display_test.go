@@ -348,9 +348,9 @@ func TestTryDecodeBase64(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := tryDecodeBase64(tt.value, tt.propType)
+			got := TryDecodeBase64(tt.value, tt.propType)
 			if got != tt.want {
-				t.Errorf("tryDecodeBase64() = %q, want %q", got, tt.want)
+				t.Errorf("TryDecodeBase64() = %q, want %q", got, tt.want)
 			}
 		})
 	}

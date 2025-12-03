@@ -3,50 +3,6 @@
 ## Purpose
 TBD - created by archiving change implement-xdebug-cli. Update Purpose after archive.
 ## Requirements
-### Requirement: Listen Command
-The CLI SHALL provide a listen command to start the DBGp server with command-based execution or daemon mode.
-
-#### Scenario: Start listening server with commands
-- **WHEN** user runs `xdebug-cli listen --commands "run" "print \$var"`
-- **THEN** server waits for Xdebug connection
-- **AND** executes commands sequentially when connection established
-- **AND** exits after commands complete or session ends
-
-#### Scenario: Start listening server with daemon flag
-- **WHEN** user runs `xdebug-cli listen -p 9003 --daemon`
-- **THEN** forks process to background
-- **AND** parent exits immediately
-- **AND** daemon continues running and waiting for connections
-
-#### Scenario: Daemon mode with commands
-- **WHEN** user runs `xdebug-cli listen --daemon --commands "break :42"`
-- **THEN** daemon starts in background
-- **AND** executes commands when connection established
-- **AND** keeps session alive after command execution
-
-#### Scenario: Missing commands flag without daemon
-- **WHEN** user runs `xdebug-cli listen` without `--commands` or `--daemon` flags
-- **THEN** displays error message explaining `--commands` is required
-- **AND** shows usage examples for command-based and daemon modes
-- **AND** exits with non-zero code
-
-### Requirement: Connection Command
-The CLI SHALL provide connection status commands with support for daemon sessions.
-
-#### Scenario: Show daemon connection status
-- **WHEN** user runs `xdebug-cli connection`
-- **AND** daemon is running
-- **THEN** displays daemon mode indicator
-- **AND** displays daemon PID and socket path
-- **AND** displays current session state
-
-#### Scenario: Kill daemon connection
-- **WHEN** user runs `xdebug-cli connection kill`
-- **AND** daemon is running
-- **THEN** sends kill signal to daemon
-- **AND** daemon terminates debug session
-- **AND** daemon exits and cleans up
-
 ### Requirement: Global CLI Flags
 The CLI SHALL provide global flags for connection settings.
 
@@ -111,49 +67,6 @@ The CLI SHALL follow test-driven development best practices for Go.
 - **WHEN** running `go test ./...`
 - **THEN** all tests pass successfully
 
-### Requirement: Non-Interactive Mode Flag
-The CLI SHALL execute debugging commands from the `--commands` flag for the listen command. Note: The `--non-interactive` flag has been removed; command-based execution is now the default and only mode for the listen command (outside of daemon mode).
-
-#### Scenario: Execute commands from arguments
-- **WHEN** user runs `xdebug-cli listen --commands "run" "step" "print myVar"`
-- **THEN** server waits for connection
-- **AND** executes commands sequentially after connection establishes
-- **AND** exits when all commands complete
-
-#### Scenario: Commands with JSON output
-- **WHEN** user runs `xdebug-cli listen --json --commands "context local"`
-- **THEN** outputs JSON-formatted results
-- **AND** includes structured data for variables, breakpoints, and state
-
-#### Scenario: Commands execution exits on error
-- **WHEN** user runs `xdebug-cli listen --commands "invalid"`
-- **THEN** displays error message
-- **AND** exits with non-zero exit code
-
-#### Scenario: Commands suppress prompts
-- **WHEN** user runs `xdebug-cli listen --commands "run"`
-- **THEN** does not display REPL prompt or interactive messages
-- **AND** outputs only command results
-
-### Requirement: Commands Flag
-The CLI SHALL require the `--commands` flag for listen command unless using daemon mode.
-
-#### Scenario: Multiple commands executed in order
-- **WHEN** user provides `--commands "break :42" "run" "print $x"`
-- **THEN** sets breakpoint at line 42
-- **AND** continues execution until breakpoint
-- **AND** prints variable $x value
-
-#### Scenario: Commands required for listen
-- **WHEN** user runs `xdebug-cli listen` without `--commands` and without `--daemon`
-- **THEN** displays error about missing required flag
-- **AND** exits with non-zero code
-
-#### Scenario: Commands optional for daemon mode
-- **WHEN** user runs `xdebug-cli listen --daemon`
-- **THEN** starts daemon without requiring `--commands` flag
-- **AND** waits for attach commands via separate invocations
-
 ### Requirement: JSON Output Mode
 The CLI SHALL provide `--json` global flag for machine-readable output.
 
@@ -183,10 +96,200 @@ The CLI SHALL provide an attach command to interact with daemon sessions.
 - **WHEN** user runs `xdebug-cli attach --commands "run"`
 - **AND** no daemon is running
 - **THEN** exits with error code 1
-- **AND** displays helpful error message
+- **AND** displays error message: "Error: no daemon running on port 9003. Start with: xdebug-cli daemon start"
 
 #### Scenario: Attach with JSON output
 - **WHEN** user runs `xdebug-cli attach --json --commands "print \$x"`
 - **THEN** requests JSON output from daemon
 - **AND** displays JSON-formatted results
+
+### Requirement: Daemon Subcommands
+The CLI SHALL provide daemon subcommands for lifecycle and session management.
+
+#### Scenario: Show daemon status
+- **WHEN** user runs `xdebug-cli daemon status`
+- **AND** daemon is running on the current port
+- **THEN** displays "Connection Status: Daemon Mode"
+- **AND** displays daemon PID, port, and socket path
+- **AND** displays start timestamp
+- **AND** shows help text for killing the daemon
+
+#### Scenario: Show status when no daemon
+- **WHEN** user runs `xdebug-cli daemon status`
+- **AND** no daemon is running on the current port
+- **THEN** displays "Connection Status: Not connected"
+- **AND** shows help text for starting a daemon
+
+#### Scenario: List all daemon sessions
+- **WHEN** user runs `xdebug-cli daemon list`
+- **THEN** displays table with columns: PID, Port, Started, Socket Path
+- **AND** shows count of active sessions
+- **AND** only includes sessions with running processes
+
+#### Scenario: List daemon sessions in JSON
+- **WHEN** user runs `xdebug-cli daemon list --json`
+- **THEN** outputs JSON array of session objects
+- **AND** each object contains: pid, port, socket_path, started_at
+
+#### Scenario: List when no daemons
+- **WHEN** user runs `xdebug-cli daemon list`
+- **AND** no daemon sessions exist
+- **THEN** displays "No active daemon sessions found."
+- **AND** shows help text for starting a daemon
+
+#### Scenario: Kill daemon on current port
+- **WHEN** user runs `xdebug-cli daemon kill`
+- **AND** daemon is running on current port
+- **THEN** sends kill request via IPC socket
+- **AND** displays success message
+- **AND** daemon process terminates and cleans up
+
+#### Scenario: Kill when no daemon
+- **WHEN** user runs `xdebug-cli daemon kill`
+- **AND** no daemon is running on current port
+- **THEN** exits with code 1
+- **AND** displays error "No active session to kill."
+- **AND** shows help text for checking status
+
+#### Scenario: Kill all daemon sessions with confirmation
+- **WHEN** user runs `xdebug-cli daemon kill --all`
+- **AND** multiple daemon sessions exist
+- **THEN** prompts "Found N active session(s). Terminate all? (y/N):"
+- **AND** waits for user input
+- **AND** kills all sessions if user confirms with "y" or "yes"
+- **AND** cancels operation if user enters anything else
+
+#### Scenario: Kill all daemon sessions without confirmation
+- **WHEN** user runs `xdebug-cli daemon kill --all --force`
+- **AND** daemon sessions exist
+- **THEN** kills all sessions without prompting
+- **AND** displays progress for each session
+- **AND** shows summary of successful/failed terminations
+
+#### Scenario: Check if daemon is alive
+- **WHEN** user runs `xdebug-cli daemon isAlive`
+- **AND** daemon is running on current port
+- **AND** process exists
+- **THEN** prints "connected"
+- **AND** exits with code 0
+
+#### Scenario: Check when daemon not alive
+- **WHEN** user runs `xdebug-cli daemon isAlive`
+- **AND** no daemon is running on current port
+- **THEN** prints "not connected"
+- **AND** exits with code 1
+
+#### Scenario: Kill detects stale processes
+- **WHEN** user runs `xdebug-cli daemon kill`
+- **AND** registry entry exists but process is dead
+- **THEN** finds process using lsof (if available)
+- **AND** verifies it's xdebug-cli by checking /proc/<pid>/comm
+- **AND** kills the stale process
+- **AND** displays "Stale process terminated successfully."
+
+### Requirement: Daemon Start Command
+The CLI SHALL provide a `daemon start` command as the primary entry point for all debugging sessions.
+
+#### Scenario: Start daemon without commands
+- **WHEN** user runs `xdebug-cli daemon start`
+- **THEN** process forks to background
+- **AND** parent process exits successfully
+- **AND** daemon starts DBGp server and waits for connections
+- **AND** displays message: "Daemon started on port 9003"
+
+#### Scenario: Start daemon with initial commands
+- **WHEN** user runs `xdebug-cli daemon start --commands "break /path/file.php:100"`
+- **THEN** daemon starts in background
+- **AND** waits for Xdebug connection
+- **AND** executes commands when connection established
+- **AND** keeps session alive after commands complete
+
+#### Scenario: Start daemon with force flag
+- **WHEN** user runs `xdebug-cli daemon start --force`
+- **AND** daemon already running on same port
+- **THEN** kills existing daemon on that port
+- **AND** starts new daemon successfully
+- **AND** displays message: "Killed daemon on port 9003 (PID 12345)" followed by "Daemon started on port 9003"
+
+#### Scenario: Daemon already running without force
+- **WHEN** user runs `xdebug-cli daemon start`
+- **AND** daemon already running on port 9003
+- **THEN** command exits with error code 1
+- **AND** displays message: "Error: daemon already running on port 9003 (PID 12345). Use 'xdebug-cli connection kill' to terminate it first or use --force to replace it."
+
+### Requirement: Command Aliases for Multiple Debugger Conventions
+The CLI SHALL support command aliases from multiple debugger conventions (GDB, DBGp protocol, VS Code) to improve usability for users from different debugging backgrounds.
+
+#### Scenario: GDB-style continue command
+- **WHEN** user executes `xdebug-cli attach --commands "continue"`
+- **THEN** execution continues to next breakpoint (same as `run`)
+- **AND** returns current execution state
+
+#### Scenario: Short continue alias
+- **WHEN** user executes `xdebug-cli attach --commands "cont"` or `--commands "c"`
+- **THEN** execution continues (same as `continue` and `run`)
+
+#### Scenario: Step into with alternative names
+- **WHEN** user executes `--commands "into"` or `--commands "step_into"`
+- **THEN** steps into next function call (same as `step`)
+
+#### Scenario: Step over with alternative name
+- **WHEN** user executes `--commands "over"`
+- **THEN** steps over next line without entering functions (same as `next`)
+
+#### Scenario: Step out with alternative name
+- **WHEN** user executes `--commands "step_out"`
+- **THEN** steps out of current function (same as `out`)
+
+#### Scenario: DBGp protocol breakpoint list
+- **WHEN** user executes `--commands "breakpoint_list"`
+- **THEN** displays all active breakpoints (same as `info breakpoints`)
+
+#### Scenario: DBGp protocol breakpoint remove
+- **WHEN** user executes `--commands "breakpoint_remove 1"`
+- **THEN** removes breakpoint with ID 1 (same as `delete 1`)
+
+#### Scenario: DBGp protocol property get
+- **WHEN** user executes `--commands "property_get -n myVar"`
+- **THEN** displays variable value (same as `print myVar`)
+- **AND** supports both `$myVar` and `myVar` syntax
+
+#### Scenario: Property get without flag error
+- **WHEN** user executes `--commands "property_get myVar"` without `-n` flag
+- **THEN** returns error: "Usage: property_get -n <variable>"
+
+#### Scenario: GDB-style clear by line
+- **WHEN** user executes `--commands "clear :42"`
+- **AND** breakpoint exists at line 42 in current file
+- **THEN** removes the breakpoint
+- **AND** returns success with message "Removed 1 breakpoint(s) at :42"
+
+#### Scenario: GDB-style clear by file and line
+- **WHEN** user executes `--commands "clear app.php:100"`
+- **AND** breakpoint exists at app.php:100
+- **THEN** removes the breakpoint
+- **AND** returns success message
+
+#### Scenario: Clear with no breakpoint at location
+- **WHEN** user executes `--commands "clear :50"`
+- **AND** no breakpoint exists at line 50
+- **THEN** returns error: "No breakpoint at location :50"
+
+#### Scenario: Clear removes multiple breakpoints at same location
+- **WHEN** multiple breakpoints exist at same file:line
+- **AND** user executes `--commands "clear file.php:42"`
+- **THEN** removes all breakpoints at that location
+- **AND** returns count of removed breakpoints
+
+#### Scenario: Aliases work with JSON output mode
+- **WHEN** user executes `--json --commands "continue"`
+- **THEN** returns JSON output with same structure as `run` command
+- **AND** command field in JSON shows "continue"
+
+#### Scenario: Help text shows aliases
+- **WHEN** user executes `--commands "help"`
+- **THEN** displays commands with their aliases
+- **AND** shows "run, r, continue, c" on same line
+- **AND** shows "step, s, into, step_into" on same line
+- **AND** shows other command groups with their aliases
 

@@ -186,7 +186,7 @@ func (d *Daemon) Fork(args []string) error {
 		return err
 	}
 	if exists {
-		return fmt.Errorf("daemon already running on port %d (PID %d)\nUse 'xdebug-cli connection kill' to terminate it first.", d.port, pid)
+		return fmt.Errorf("daemon already running on port %d (PID %d)\nUse 'xdebug-cli daemon kill' to terminate it first.", d.port, pid)
 	}
 
 	// Get current executable path

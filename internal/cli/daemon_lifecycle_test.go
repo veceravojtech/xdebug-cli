@@ -82,16 +82,21 @@ func TestActiveSessionConcurrency(t *testing.T) {
 	clearActiveSession()
 }
 
-func TestConnectionSubcommands(t *testing.T) {
+func TestDaemonSubcommands(t *testing.T) {
 	tests := []struct {
 		name        string
 		subcommand  string
 		description string
 	}{
 		{
+			name:        "start command",
+			subcommand:  "start",
+			description: "start a new daemon session",
+		},
+		{
 			name:        "status command",
-			subcommand:  "",
-			description: "show connection status",
+			subcommand:  "status",
+			description: "show daemon status",
 		},
 		{
 			name:        "list command",
@@ -101,52 +106,50 @@ func TestConnectionSubcommands(t *testing.T) {
 		{
 			name:        "isAlive command",
 			subcommand:  "isAlive",
-			description: "check if session is active",
+			description: "check if daemon is running",
 		},
 		{
 			name:        "kill command",
 			subcommand:  "kill",
-			description: "terminate active session",
+			description: "terminate daemon session(s)",
 		},
 	}
 
-	// Verify that connection command exists
-	if connectionCmd == nil {
-		t.Fatal("connectionCmd should not be nil")
+	// Verify that daemon command exists
+	if daemonCmd == nil {
+		t.Fatal("daemonCmd should not be nil")
+	}
+
+	// Verify daemon command Use
+	if daemonCmd.Use != "daemon" {
+		t.Errorf("expected Use='daemon', got %q", daemonCmd.Use)
 	}
 
 	// Verify subcommands are registered
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.subcommand == "" {
-				// Main connection command
-				if connectionCmd.Use != "connection" {
-					t.Errorf("expected Use='connection', got %q", connectionCmd.Use)
+			// Find subcommand
+			var found bool
+			for _, cmd := range daemonCmd.Commands() {
+				if cmd.Use == tt.subcommand {
+					found = true
+					break
 				}
-			} else {
-				// Find subcommand
-				var found bool
-				for _, cmd := range connectionCmd.Commands() {
-					if cmd.Use == tt.subcommand {
-						found = true
-						break
-					}
-				}
-				if !found {
-					t.Errorf("subcommand %q not found", tt.subcommand)
-				}
+			}
+			if !found {
+				t.Errorf("subcommand %q not found", tt.subcommand)
 			}
 		})
 	}
 }
 
-func TestConnectionListFlags(t *testing.T) {
+func TestDaemonListFlags(t *testing.T) {
 	// Verify that list command has --json flag
-	if connectionListCmd == nil {
-		t.Fatal("connectionListCmd should not be nil")
+	if listCmd == nil {
+		t.Fatal("listCmd should not be nil")
 	}
 
-	jsonFlag := connectionListCmd.Flags().Lookup("json")
+	jsonFlag := listCmd.Flags().Lookup("json")
 	if jsonFlag == nil {
 		t.Error("list command should have --json flag")
 	}
@@ -156,13 +159,13 @@ func TestConnectionListFlags(t *testing.T) {
 	}
 }
 
-func TestConnectionKillFlags(t *testing.T) {
+func TestDaemonKillFlags(t *testing.T) {
 	// Verify that kill command has --all and --force flags
-	if connectionKillCmd == nil {
-		t.Fatal("connectionKillCmd should not be nil")
+	if killCmd == nil {
+		t.Fatal("killCmd should not be nil")
 	}
 
-	allFlag := connectionKillCmd.Flags().Lookup("all")
+	allFlag := killCmd.Flags().Lookup("all")
 	if allFlag == nil {
 		t.Error("kill command should have --all flag")
 	}
@@ -171,7 +174,7 @@ func TestConnectionKillFlags(t *testing.T) {
 		t.Errorf("expected usage 'Kill all daemon sessions', got %q", allFlag.Usage)
 	}
 
-	forceFlag := connectionKillCmd.Flags().Lookup("force")
+	forceFlag := killCmd.Flags().Lookup("force")
 	if forceFlag == nil {
 		t.Error("kill command should have --force flag")
 	}
