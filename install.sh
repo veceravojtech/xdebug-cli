@@ -10,7 +10,7 @@ NC='\033[0m'
 
 INSTALL_DIR="${HOME}/.local/bin"
 BINARY_NAME="xdebug-cli"
-VERSION="1.0.0"
+VERSION="1.0.1"
 BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S')
 
 echo -e "${GREEN}=== Xdebug CLI Installation ===${NC}"
