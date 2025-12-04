@@ -282,6 +282,26 @@ func runDaemonStart() error {
 		CLIArgs.BreakpointTimeout = 0
 	}
 
+	// Check if we're already in daemon mode (child process)
+	// If so, run the daemon directly - don't do parent-only validation
+	if daemon.IsDaemonMode() {
+		// Create and start server (child process owns the server)
+		server := dbgp.NewServer(CLIArgs.Host, CLIArgs.Port)
+		if err := server.Listen(); err != nil {
+			return fmt.Errorf("failed to start server: %w", err)
+		}
+		defer server.Close()
+
+		d, err := daemon.NewDaemon(server, CLIArgs.Port)
+		if err != nil {
+			return fmt.Errorf("failed to create daemon: %w", err)
+		}
+
+		return runDaemonProcess(d, server)
+	}
+
+	// Parent process - do validation and fork
+
 	// Validate that either --curl or --enable-external-connection is provided
 	if CLIArgs.Curl == "" && !CLIArgs.EnableExternalConnection {
 		return fmt.Errorf(`either --curl or --enable-external-connection is required
@@ -315,33 +335,20 @@ Use --enable-external-connection to wait for external triggers (browser, IDE, ma
 	// Auto-kill all existing daemons before starting
 	killAllDaemonsSilent()
 
-	// Create and start server
-	server := dbgp.NewServer(CLIArgs.Host, CLIArgs.Port)
-	if err := server.Listen(); err != nil {
-		return fmt.Errorf("failed to start server: %w", err)
-	}
-	defer server.Close()
-
-	// Start daemon mode
-	return startDaemonMode(server)
+	// Fork the daemon (child will create and start server)
+	return forkDaemon()
 }
 
-// startDaemonMode handles daemon mode: fork if parent, or start daemon if child
-func startDaemonMode(server *dbgp.Server) error {
-	// Create daemon instance
-	d, err := daemon.NewDaemon(server, CLIArgs.Port)
+// forkDaemon handles the parent process forking and waiting for daemon status
+func forkDaemon() error {
+	// Create a temporary daemon instance just for forking (no server needed)
+	d, err := daemon.NewDaemon(nil, CLIArgs.Port)
 	if err != nil {
 		return fmt.Errorf("failed to create daemon: %w", err)
 	}
 
-	// Check if we're already in daemon mode (child process)
-	if daemon.IsDaemonMode() {
-		// We're the child process, run the daemon
-		return runDaemonProcess(d, server)
-	}
-
-	// Parent process: Check for non-absolute breakpoint paths and show warning BEFORE forking
-	// (child process has stdout/stderr redirected to /dev/null, so warnings must be shown here)
+	// Check for non-absolute breakpoint paths and show warning BEFORE forking
+	// (child process has stderr redirected to log file)
 	hasNonAbsolute, nonAbsPath := daemon.HasNonAbsoluteBreakpoint(CLIArgs.Commands)
 	if hasNonAbsolute {
 		pathStore, err := daemon.NewBreakpointPathStore()
@@ -372,16 +379,65 @@ func startDaemonMode(server *dbgp.Server) error {
 		fmt.Fprintln(os.Stderr, "")
 	}
 
-	// We're the parent process, fork to background
-	// Build command line args to pass to child
-	args := os.Args
+	// Clean up any old status file before forking
+	daemon.CleanupStatusFile(CLIArgs.Port)
+
+	// Check if we have breakpoint commands that need validation
+	hasBreakpointCommand := false
+	for _, cmd := range CLIArgs.Commands {
+		if strings.HasPrefix(cmd, "break ") || strings.HasPrefix(cmd, "b ") {
+			hasBreakpointCommand = true
+			break
+		}
+	}
 
 	// Fork the process
+	args := os.Args
 	if err := d.Fork(args); err != nil {
 		return fmt.Errorf("failed to fork daemon: %w", err)
 	}
 
-	// Parent process exits successfully
+	// If we have breakpoint commands and a timeout, wait for daemon to report status
+	if hasBreakpointCommand && CLIArgs.BreakpointTimeout > 0 {
+		// Wait for status file with timeout
+		timeout := time.Duration(CLIArgs.BreakpointTimeout+5) * time.Second // Extra 5s for daemon overhead
+		deadline := time.Now().Add(timeout)
+
+		for time.Now().Before(deadline) {
+			status, exists, err := daemon.ReadStatus(CLIArgs.Port)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error reading daemon status: %v\n", err)
+				os.Exit(1)
+			}
+
+			if exists {
+				daemon.CleanupStatusFile(CLIArgs.Port)
+				if strings.HasPrefix(status, "ready:") {
+					// Breakpoint hit successfully - show location
+					location := strings.TrimPrefix(status, "ready:")
+					fmt.Printf("Breakpoint hit at %s\n", location)
+					os.Exit(0)
+				} else if status == "ready" {
+					// Legacy ready without location
+					fmt.Println("Breakpoint hit")
+					os.Exit(0)
+				} else if strings.HasPrefix(status, "error:") {
+					// Error occurred
+					errorMsg := strings.TrimPrefix(status, "error:")
+					fmt.Fprintf(os.Stderr, "Error: %s\n", errorMsg)
+					os.Exit(1)
+				}
+			}
+
+			time.Sleep(100 * time.Millisecond)
+		}
+
+		// Timeout waiting for daemon status
+		fmt.Fprintf(os.Stderr, "Timeout waiting for daemon status\n")
+		os.Exit(124)
+	}
+
+	// No breakpoint validation needed, parent exits successfully
 	os.Exit(0)
 	return nil
 }
@@ -449,12 +505,18 @@ func runDaemonProcess(d *daemon.Daemon, server *dbgp.Server) error {
 		if len(CLIArgs.Commands) > 0 {
 			executor := daemon.NewCommandExecutor(client)
 
-			// Check if any command sets a breakpoint
+			// Check if any command sets a breakpoint and collect breakpoint locations
 			hasBreakpoint := false
 			hasRunCommand := false
+			var breakpointLocations []string
 			for _, cmd := range CLIArgs.Commands {
 				if strings.HasPrefix(cmd, "break ") || strings.HasPrefix(cmd, "b ") {
 					hasBreakpoint = true
+					// Extract the location from the command
+					parts := strings.Fields(cmd)
+					if len(parts) >= 2 {
+						breakpointLocations = append(breakpointLocations, parts[1])
+					}
 				}
 				if cmd == "run" || cmd == "r" {
 					hasRunCommand = true
@@ -467,9 +529,9 @@ func runDaemonProcess(d *daemon.Daemon, server *dbgp.Server) error {
 				commandsToExecute = append(commandsToExecute, "run")
 			}
 
-			// Set up breakpoint validation timeout if we have non-absolute paths
+			// Set up breakpoint validation timeout for ALL breakpoints (not just non-absolute)
 			var timeoutCh <-chan time.Time
-			if hasNonAbsolute && hasBreakpoint && CLIArgs.BreakpointTimeout > 0 {
+			if hasBreakpoint && CLIArgs.BreakpointTimeout > 0 {
 				timeoutCh = time.After(time.Duration(CLIArgs.BreakpointTimeout) * time.Second)
 			}
 
@@ -483,8 +545,8 @@ func runDaemonProcess(d *daemon.Daemon, server *dbgp.Server) error {
 				}
 			}
 
-			// After run command, check if we hit a breakpoint (validate non-absolute path worked)
-			if hasNonAbsolute && hasBreakpoint && CLIArgs.BreakpointTimeout > 0 {
+			// After run command, check if we hit a breakpoint (validate for ALL breakpoints)
+			if hasBreakpoint && CLIArgs.BreakpointTimeout > 0 {
 				// Check the status - if we're in "break" status, the breakpoint was hit
 				statusResp, err := client.Status()
 				if err != nil {
@@ -492,26 +554,37 @@ func runDaemonProcess(d *daemon.Daemon, server *dbgp.Server) error {
 					return
 				}
 
+				// Build breakpoint location string for error messages
+				breakpointStr := strings.Join(breakpointLocations, ", ")
+
 				if statusResp.Status == "break" {
 					// Breakpoint was hit! Save the full path for future suggestions
-					currentFile, _ := client.GetSession().GetCurrentLocation()
+					currentFile, currentLine := client.GetSession().GetCurrentLocation()
 					if currentFile != "" && pathStore != nil {
 						pathStore.SaveBreakpointPath(currentFile)
 					}
+					// Signal success to parent process with location
+					d.WriteStatus(fmt.Sprintf("ready:%s:%d", currentFile, currentLine))
 				} else if statusResp.Status == "stopping" || statusResp.Status == "stopped" {
 					// Script ended without hitting breakpoint - this is the fail-fast case
-					errorMsg := fmt.Sprintf("Breakpoint at '%s' was not hit - script completed.", nonAbsPath)
-					if suggestedPath != "" {
-						lineNum := ""
-						if strings.Contains(nonAbsPath, ":") {
-							lineNum = ":" + strings.Split(nonAbsPath, ":")[1]
+					errorMsg := fmt.Sprintf("Breakpoint at '%s' was not hit - script completed.", breakpointStr)
+					if hasNonAbsolute {
+						if suggestedPath != "" {
+							lineNum := ""
+							if strings.Contains(nonAbsPath, ":") {
+								lineNum = ":" + strings.Split(nonAbsPath, ":")[1]
+							}
+							errorMsg += fmt.Sprintf(" Use full path: %s%s", suggestedPath, lineNum)
+						} else {
+							errorMsg += " Ensure you use an absolute path (starting with /)."
 						}
-						errorMsg += fmt.Sprintf("\nUse full path: %s%s", suggestedPath, lineNum)
 					} else {
-						errorMsg += "\nEnsure you use an absolute path (starting with /)."
+						errorMsg += " Verify the breakpoint location is correct and the code path is executed."
 					}
-					daemonErr = fmt.Errorf("%s", errorMsg)
-					return
+					// Signal error to parent process
+					d.WriteStatus("error:" + errorMsg)
+					d.Shutdown()
+					os.Exit(1)
 				} else {
 					// Still running - wait for timeout or breakpoint hit
 					select {
@@ -519,44 +592,31 @@ func runDaemonProcess(d *daemon.Daemon, server *dbgp.Server) error {
 						// Timeout expired - check status one more time
 						statusResp, err := client.Status()
 						if err != nil || statusResp.Status != "break" {
-							// Build list of pending breakpoints
-							pendingBreakpoints := nonAbsPath
-
-							// Write timeout warning to stderr
-							fmt.Fprintf(os.Stderr, "\nWarning: breakpoint not hit within %d seconds\n", CLIArgs.BreakpointTimeout)
-							fmt.Fprintf(os.Stderr, "Pending breakpoints: %s\n", pendingBreakpoints)
-							fmt.Fprintf(os.Stderr, "\nTroubleshooting:\n")
-							fmt.Fprintf(os.Stderr, "  - Increase timeout: --breakpoint-timeout 60\n")
-							fmt.Fprintf(os.Stderr, "  - Wait indefinitely: --wait-forever\n")
-							if suggestedPath != "" {
-								lineNum := ""
-								if strings.Contains(nonAbsPath, ":") {
-									lineNum = ":" + strings.Split(nonAbsPath, ":")[1]
-								}
-								fmt.Fprintf(os.Stderr, "  - Use absolute path: %s%s\n", suggestedPath, lineNum)
-							} else {
-								fmt.Fprintf(os.Stderr, "  - Ensure breakpoint uses absolute path (starting with /)\n")
-							}
-							fmt.Fprintln(os.Stderr, "")
+							// Build timeout error message
+							errorMsg := fmt.Sprintf("Breakpoint not hit within %d seconds. Pending: %s", CLIArgs.BreakpointTimeout, breakpointStr)
 
 							// Write timeout event to log file
 							logFilePath := fmt.Sprintf("/tmp/xdebug-cli-daemon-%d.log", CLIArgs.Port)
-							logEntry := fmt.Sprintf("[%s] Timeout: breakpoint not hit within %d seconds. Pending: %s\n",
-								time.Now().Format("2006-01-02 15:04:05"), CLIArgs.BreakpointTimeout, pendingBreakpoints)
+							logEntry := fmt.Sprintf("[%s] Timeout: %s\n", time.Now().Format("2006-01-02 15:04:05"), errorMsg)
 							if logFile, err := os.OpenFile(logFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
 								logFile.WriteString(logEntry)
 								logFile.Close()
 							}
+
+							// Signal timeout error to parent process
+							d.WriteStatus("error:" + errorMsg)
 
 							// Exit with code 124 (Unix timeout convention)
 							d.Shutdown()
 							os.Exit(124)
 						}
 						// Breakpoint was hit in time
-						currentFile, _ := client.GetSession().GetCurrentLocation()
+						currentFile, currentLine := client.GetSession().GetCurrentLocation()
 						if currentFile != "" && pathStore != nil {
 							pathStore.SaveBreakpointPath(currentFile)
 						}
+						// Signal success to parent process with location
+						d.WriteStatus(fmt.Sprintf("ready:%s:%d", currentFile, currentLine))
 					default:
 						// No timeout yet, continue normally
 					}

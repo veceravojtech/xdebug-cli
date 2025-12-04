@@ -25,6 +25,7 @@ type Daemon struct {
 	port       int
 	pidFile    string
 	socketPath string
+	statusFile string
 	shutdown   chan os.Signal
 	ctx        context.Context
 	cancel     context.CancelFunc
@@ -45,6 +46,9 @@ func NewDaemon(server *dbgp.Server, port int) (*Daemon, error) {
 	// Generate socket path
 	socketPath := fmt.Sprintf("/tmp/xdebug-cli-session-%d.sock", port)
 
+	// Generate status file path (for parent-child communication)
+	statusFile := fmt.Sprintf("/tmp/xdebug-cli-daemon-%d.status", port)
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &Daemon{
@@ -53,10 +57,37 @@ func NewDaemon(server *dbgp.Server, port int) (*Daemon, error) {
 		port:       port,
 		pidFile:    pidFile,
 		socketPath: socketPath,
+		statusFile: statusFile,
 		shutdown:   make(chan os.Signal, 1),
 		ctx:        ctx,
 		cancel:     cancel,
 	}, nil
+}
+
+// WriteStatus writes the daemon status to the status file
+// Status can be "ready" (breakpoint hit) or "error:message" (failure)
+func (d *Daemon) WriteStatus(status string) error {
+	return os.WriteFile(d.statusFile, []byte(status), 0644)
+}
+
+// ReadStatus reads the daemon status from the status file
+// Returns status string, exists bool, error
+func ReadStatus(port int) (string, bool, error) {
+	statusFile := fmt.Sprintf("/tmp/xdebug-cli-daemon-%d.status", port)
+	data, err := os.ReadFile(statusFile)
+	if os.IsNotExist(err) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return string(data), true, nil
+}
+
+// CleanupStatusFile removes the status file
+func CleanupStatusFile(port int) {
+	statusFile := fmt.Sprintf("/tmp/xdebug-cli-daemon-%d.status", port)
+	os.Remove(statusFile)
 }
 
 // CheckExisting checks if a daemon is already running on this port
@@ -214,14 +245,23 @@ func (d *Daemon) Fork(args []string) error {
 	}
 	defer devNull.Close()
 
+	// Open log file for stderr (to capture daemon errors)
+	logFile := fmt.Sprintf("/tmp/xdebug-cli-daemon-%d.log", d.port)
+	stderrLog, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		// Fall back to /dev/null if log file can't be created
+		stderrLog = devNull
+	}
+	defer stderrLog.Close()
+
 	// Fork process
 	attr := &syscall.ProcAttr{
 		Dir: "",
 		Env: env,
 		Files: []uintptr{
-			devNull.Fd(), // stdin
-			devNull.Fd(), // stdout
-			devNull.Fd(), // stderr
+			devNull.Fd(),    // stdin
+			devNull.Fd(),    // stdout
+			stderrLog.Fd(),  // stderr -> log file for debugging
 		},
 		Sys: &syscall.SysProcAttr{
 			Setsid: true, // Create new session (detach from terminal)
