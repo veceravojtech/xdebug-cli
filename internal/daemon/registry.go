@@ -154,15 +154,20 @@ func (r *SessionRegistry) save() error {
 	return nil
 }
 
-// cleanupStale removes sessions whose processes no longer exist
+// cleanupStale removes sessions whose processes no longer exist or have been recycled
 func (r *SessionRegistry) cleanupStale() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	activeSessions := []SessionInfo{}
 	for _, s := range r.sessions {
-		if processExists(s.PID) {
+		if validateProcess(s.PID) {
 			activeSessions = append(activeSessions, s)
+		} else {
+			// Clean up orphaned socket file
+			if s.SocketPath != "" {
+				os.Remove(s.SocketPath)
+			}
 		}
 	}
 
@@ -174,7 +179,46 @@ func (r *SessionRegistry) cleanupStale() error {
 	return nil
 }
 
+// CleanupStaleEntries is the public method to clean up stale entries
+// This is called explicitly by daemon start command
+func (r *SessionRegistry) CleanupStaleEntries() error {
+	return r.cleanupStale()
+}
+
+// validateProcess checks if a process with the given PID exists and is xdebug-cli
+func validateProcess(pid int) bool {
+	// Check if /proc/<pid> exists (Linux-specific)
+	procPath := fmt.Sprintf("/proc/%d", pid)
+	if _, err := os.Stat(procPath); err != nil {
+		return false
+	}
+
+	// Verify process is xdebug-cli by checking /proc/<pid>/comm
+	commPath := fmt.Sprintf("/proc/%d/comm", pid)
+	commData, err := os.ReadFile(commPath)
+	if err != nil {
+		return false
+	}
+
+	// comm contains the executable name, usually with a trailing newline
+	// For xdebug-cli, it will be "xdebug-cli\n"
+	// For test binaries, it will be "daemon.test\n", "cli.test\n", etc.
+	comm := string(commData)
+
+	// Check if it starts with "xdebug-cli" (the actual binary)
+	if len(comm) >= 10 && comm[0:10] == "xdebug-cli" {
+		return true
+	}
+	// Check for test binaries - any .test suffix
+	if len(comm) >= 6 && comm[len(comm)-6:len(comm)-1] == ".test" {
+		return true
+	}
+
+	return false
+}
+
 // processExists checks if a process with the given PID exists
+// NOTE: This is less strict than validateProcess - it only checks existence
 func processExists(pid int) bool {
 	// Check if /proc/<pid> exists (Linux-specific)
 	procPath := fmt.Sprintf("/proc/%d", pid)

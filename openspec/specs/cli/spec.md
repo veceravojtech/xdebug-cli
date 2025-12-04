@@ -191,31 +191,52 @@ The CLI SHALL provide daemon subcommands for lifecycle and session management.
 The CLI SHALL provide a `daemon start` command as the primary entry point for all debugging sessions.
 
 #### Scenario: Start daemon without commands
-- **WHEN** user runs `xdebug-cli daemon start`
+- **WHEN** user runs `xdebug-cli daemon start --curl "http://localhost/app.php"`
 - **THEN** process forks to background
 - **AND** parent process exits successfully
 - **AND** daemon starts DBGp server and waits for connections
 - **AND** displays message: "Daemon started on port 9003"
 
 #### Scenario: Start daemon with initial commands
-- **WHEN** user runs `xdebug-cli daemon start --commands "break /path/file.php:100"`
+- **WHEN** user runs `xdebug-cli daemon start --curl "http://localhost/app.php" --commands "break /path/file.php:100"`
 - **THEN** daemon starts in background
 - **AND** waits for Xdebug connection
 - **AND** executes commands when connection established
 - **AND** keeps session alive after commands complete
 
 #### Scenario: Start daemon with force flag
-- **WHEN** user runs `xdebug-cli daemon start --force`
+- **WHEN** user runs `xdebug-cli daemon start --curl "http://localhost/app.php" --force`
 - **AND** daemon already running on same port
 - **THEN** kills existing daemon on that port
 - **AND** starts new daemon successfully
 - **AND** displays message: "Killed daemon on port 9003 (PID 12345)" followed by "Daemon started on port 9003"
 
 #### Scenario: Daemon already running without force
-- **WHEN** user runs `xdebug-cli daemon start`
+- **WHEN** user runs `xdebug-cli daemon start --curl "http://localhost/app.php"`
 - **AND** daemon already running on port 9003
 - **THEN** command exits with error code 1
 - **AND** displays message: "Error: daemon already running on port 9003 (PID 12345). Use 'xdebug-cli connection kill' to terminate it first or use --force to replace it."
+
+#### Scenario: Start daemon with external connection flag
+- **WHEN** user runs `xdebug-cli daemon start --enable-external-connection`
+- **THEN** process forks to background
+- **AND** parent process exits successfully
+- **AND** daemon starts DBGp server on specified port
+- **AND** waits indefinitely for external Xdebug connection
+- **AND** displays message: "Daemon started on port 9003 (waiting for external connection)"
+
+#### Scenario: External connection with initial commands
+- **WHEN** user runs `xdebug-cli daemon start --enable-external-connection --commands "break /path/file.php:100"`
+- **THEN** daemon starts in background
+- **AND** waits for external Xdebug connection
+- **AND** executes commands when connection established
+- **AND** keeps session alive after commands complete
+
+#### Scenario: Start daemon without required flags
+- **WHEN** user runs `xdebug-cli daemon start` without `--curl` or `--enable-external-connection`
+- **THEN** command exits with error code 1
+- **AND** displays error message explaining that either `--curl` or `--enable-external-connection` is required
+- **AND** shows usage examples for both options
 
 ### Requirement: Command Aliases for Multiple Debugger Conventions
 The CLI SHALL support command aliases from multiple debugger conventions (GDB, DBGp protocol, VS Code) to improve usability for users from different debugging backgrounds.
@@ -292,4 +313,75 @@ The CLI SHALL support command aliases from multiple debugger conventions (GDB, D
 - **AND** shows "run, r, continue, c" on same line
 - **AND** shows "step, s, into, step_into" on same line
 - **AND** shows other command groups with their aliases
+
+### Requirement: Breakpoint Path Validation with Fail-Fast
+The CLI SHALL validate breakpoints with non-absolute paths by waiting for the first hit, and terminate the daemon if the breakpoint is not triggered within a timeout period.
+
+#### Scenario: Absolute path breakpoint - normal operation
+- **WHEN** user runs `daemon start --curl "..." --commands "break /var/www/app/File.php:100"`
+- **THEN** daemon starts and sets breakpoint
+- **AND** curl triggers request
+- **AND** when breakpoint hits, daemon continues normally
+- **AND** the full path is stored for future suggestions
+
+#### Scenario: Non-absolute path breakpoint hits - success
+- **WHEN** user runs `daemon start --curl "..." --commands "break File.php:100"`
+- **AND** breakpoint path resolves correctly and is hit within timeout
+- **THEN** warning is shown: "Warning: Breakpoint path 'File.php' is not absolute"
+- **AND** daemon continues normally after breakpoint hit
+- **AND** resolved full path is stored for future suggestions
+
+#### Scenario: Non-absolute path breakpoint not hit - fail fast
+- **WHEN** user runs `daemon start --curl "..." --commands "break File.php:100"`
+- **AND** breakpoint is not hit within timeout (default 10s)
+- **THEN** daemon is terminated
+- **AND** error is displayed: "Error: Breakpoint at 'File.php:100' was not hit within 10s"
+- **AND** if known path exists, shows: "Use full path: /var/www/app/File.php:100"
+- **AND** exit code is non-zero
+
+#### Scenario: Non-absolute path with known suggestion
+- **WHEN** user previously used path `/var/www/app/controllers/PriceLoader.php`
+- **AND** user runs `daemon start --curl "..." --commands "break PriceLoader.php:369"`
+- **AND** breakpoint not hit within timeout
+- **THEN** error includes suggestion: "Use full path: /var/www/app/controllers/PriceLoader.php:369"
+
+#### Scenario: Non-absolute path with no known suggestion
+- **WHEN** no previous path matches filename `NewFile.php`
+- **AND** user runs `daemon start --curl "..." --commands "break NewFile.php:50"`
+- **AND** breakpoint not hit within timeout
+- **THEN** error shows: "Error: Breakpoint at 'NewFile.php:50' was not hit. Ensure you use an absolute path."
+
+#### Scenario: Current file line syntax - no validation needed
+- **WHEN** user runs with `--commands "break :100"`
+- **THEN** breakpoint uses current file from session (absolute path)
+- **AND** no timeout validation is applied
+
+#### Scenario: Custom timeout flag
+- **WHEN** user runs `daemon start --breakpoint-timeout 30s --curl "..." --commands "break File.php:100"`
+- **THEN** daemon waits up to 30 seconds for breakpoint hit before failing
+
+### Requirement: Timeout Exit Feedback
+The CLI SHALL provide clear feedback when breakpoint validation times out.
+
+#### Scenario: Warning message on timeout
+- **WHEN** breakpoint validation timeout occurs
+- **THEN** prints warning to stderr: "Warning: breakpoint not hit within Xs"
+- **AND** includes list of pending breakpoints that were not hit
+- **AND** suggests increasing timeout with `--breakpoint-timeout` or `--wait-forever`
+
+#### Scenario: Distinct exit code for timeout
+- **WHEN** breakpoint validation timeout occurs
+- **THEN** exits with code 124 (Unix timeout convention)
+- **AND** exit code is distinct from general errors (code 1)
+
+#### Scenario: Log file for timeout events
+- **WHEN** breakpoint validation timeout occurs
+- **THEN** writes event to `/tmp/xdebug-cli-daemon-<port>.log`
+- **AND** includes timestamp, timeout duration, and breakpoint details
+- **AND** log file aids post-mortem debugging
+
+#### Scenario: Normal exit when breakpoint hit
+- **WHEN** breakpoint is hit within timeout period
+- **THEN** no timeout warning is printed
+- **AND** daemon continues running normally
 

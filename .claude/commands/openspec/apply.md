@@ -19,6 +19,7 @@ Track these steps as TODOs and complete them one by one.
 5. Reference `openspec list` or `openspec show <item>` when additional context is required.
 6. **MANDATORY**: Run `./install.sh` to rebuild and install the updated CLI binary to `~/.local/bin/`.
 7. Verify the installation succeeded by running `xdebug-cli version`.
+8. **Documentation Review**: If this change affects user-facing commands, flags, or workflows, update both CLAUDE.md and README.md to reflect the changes. See `openspec/specs/development-workflow/spec.md` (Documentation Validation requirement) for the spec-to-documentation mapping.
 
 **Reference**
 - Use `openspec show <id> --json --deltas-only` if you need additional context from the proposal while implementing.

@@ -34,6 +34,7 @@ Keep this managed block so 'openspec update' can refresh the instructions.
 
 ```bash
 xdebug-cli daemon start --curl "<curl-args>" [--commands "cmd1" "cmd2"]  # Start daemon with HTTP trigger
+xdebug-cli daemon start --enable-external-connection --commands "break :42"  # Start daemon for external trigger
 xdebug-cli attach --commands "context local" "print \$var"  # Execute commands on daemon session
 xdebug-cli daemon status                                 # Show daemon status
 xdebug-cli daemon list [--json]                          # List all daemon sessions
@@ -200,11 +201,14 @@ All debugging in xdebug-cli uses a daemon-based workflow. The daemon runs in the
 
 ### Basic Usage
 
-The `--curl` flag is **required** and triggers the HTTP request automatically with the XDEBUG_TRIGGER cookie:
+Either `--curl` or `--enable-external-connection` is **required**:
 
 ```bash
-# 1. Start daemon with curl trigger (single command - no race conditions!)
+# Option 1: Start daemon with curl trigger (single command - no race conditions!)
 xdebug-cli daemon start --curl "http://localhost/app.php"
+
+# Option 2: Start daemon waiting for external trigger (browser, IDE, manual)
+xdebug-cli daemon start --enable-external-connection --commands "break /app/file.php:42"
 
 # 2. Execute debugging commands via attach
 xdebug-cli attach --commands "run"
@@ -247,6 +251,65 @@ xdebug-cli daemon start --curl "http://localhost/api -H 'Authorization: Bearer t
 The XDEBUG_TRIGGER cookie is automatically appended to all requests.
 
 The daemon automatically kills any existing daemon on the same port before starting, so you never need to worry about stale processes.
+
+### Breakpoint Timeout Options
+
+The daemon includes timeout handling for breakpoint validation to detect non-absolute paths early:
+
+```bash
+# Default 30-second timeout (handles most scenarios)
+xdebug-cli daemon start --curl "http://localhost/app.php" --commands "break :42"
+
+# Disable timeout for cold starts or unpredictable timing
+xdebug-cli daemon start --curl "http://localhost/app.php" --wait-forever --commands "break :42"
+
+# Custom timeout (in seconds)
+xdebug-cli daemon start --curl "http://localhost/app.php" --breakpoint-timeout 60 --commands "break :42"
+```
+
+**When to use each option:**
+- **Default (30s)**: Handles most PHP applications with opcache, framework bootstrap
+- **--wait-forever**: Cold cache scenarios, slow database connections, deep code paths
+- **--breakpoint-timeout N**: Fine-tune for your specific environment
+
+**Cold start scenarios that benefit from --wait-forever:**
+- First request after clearing opcache (5-10 seconds compilation)
+- Laravel/Symfony bootstrap on cold cache (2-3 seconds)
+- Database connection pool initialization
+- Composer autoloader generation
+- Deep code paths with complex initialization
+
+### External Connection Mode
+
+Use `--enable-external-connection` when you want the daemon to wait for an Xdebug connection triggered externally:
+
+```bash
+# Start with breakpoints ready
+xdebug-cli daemon start --enable-external-connection --commands "break /app/file.php:42"
+
+# Start on a different port
+xdebug-cli daemon start --enable-external-connection -p 9004 --commands "break /app/file.php:42"
+```
+
+**Use cases for external connection mode:**
+- Triggering PHP from a browser with XDEBUG_TRIGGER cookie
+- IDE-initiated debugging (PhpStorm, VS Code)
+- Manual curl from another terminal
+- CLI script execution with `xdebug.start_with_request=trigger`
+
+**Workflow example:**
+```bash
+# Terminal 1: Start daemon waiting for connection
+xdebug-cli daemon start --enable-external-connection --commands "break /var/www/app.php:100"
+
+# Terminal 2 or Browser: Trigger PHP with Xdebug
+curl http://localhost/app.php -b "XDEBUG_TRIGGER=1"
+
+# Terminal 1: Inspect and debug
+xdebug-cli attach --commands "context local"
+xdebug-cli attach --commands "run"
+xdebug-cli daemon kill
+```
 
 ### JSON Output Mode
 
@@ -307,6 +370,7 @@ xdebug-cli daemon start --curl "http://localhost/api -X POST -d '{\"key\":\"valu
 
 - `0`: All commands executed successfully
 - `1`: Command execution failed or session ended prematurely
+- `124`: Breakpoint validation timeout (breakpoint not hit within configured timeout period)
 
 ## Managing Daemon Sessions
 
@@ -418,19 +482,21 @@ xdebug-cli daemon kill
 
 ## Error Messages
 
-**Missing --curl flag:**
+**Missing required flag:**
 ```
-Error: --curl flag is required
+Error: either --curl or --enable-external-connection is required
 
 Usage:
   xdebug-cli daemon start --curl "<curl-args>"
+  xdebug-cli daemon start --enable-external-connection --commands "break :42"
 
 Examples:
   xdebug-cli daemon start --curl "http://localhost/app.php"
   xdebug-cli daemon start --curl "http://localhost/api -X POST -d 'data'"
+  xdebug-cli daemon start --enable-external-connection --commands "break /app/file.php:42"
 
-The --curl flag specifies the HTTP request to trigger Xdebug.
-XDEBUG_TRIGGER cookie is added automatically.
+Use --curl to trigger Xdebug via HTTP request (XDEBUG_TRIGGER cookie added automatically).
+Use --enable-external-connection to wait for external triggers (browser, IDE, manual).
 ```
 
 **Curl failure:**
@@ -448,6 +514,7 @@ Error: curl not found in PATH
 ```
 Error: no daemon running on port 9003. Start with:
   xdebug-cli daemon start --curl "http://localhost/app.php"
+  xdebug-cli daemon start --enable-external-connection --commands "break :42"
 ```
 
 **Daemon already running (auto-killed by daemon start):**
@@ -464,6 +531,75 @@ Error: failed to connect to daemon socket: /tmp/xdebug-cli-session-9003.sock
 The daemon may have crashed or ended. Check 'xdebug-cli daemon status' for status.
 ```
 
+## Troubleshooting
+
+### Breakpoint Timeout Issues
+
+When a breakpoint is not hit within the configured timeout period, the daemon exits with code 124 and displays helpful troubleshooting information.
+
+**Timeout warning message:**
+```
+Warning: breakpoint not hit within 30 seconds
+Pending breakpoints: file.php:42
+
+Troubleshooting:
+  - Increase timeout: --breakpoint-timeout 60
+  - Wait indefinitely: --wait-forever
+  - Use absolute path: /var/www/app/file.php:42
+```
+
+**Common causes and solutions:**
+
+1. **Timeout too short for slow application bootstrap:**
+   ```bash
+   # Increase timeout to 60 seconds
+   xdebug-cli daemon start --curl "http://localhost/app.php" --commands "break :42" --breakpoint-timeout 60
+
+   # Or wait indefinitely (useful for cold starts)
+   xdebug-cli daemon start --curl "http://localhost/app.php" --commands "break :42" --wait-forever
+   ```
+
+2. **Non-absolute breakpoint path:**
+   ```bash
+   # ❌ Bad: relative path
+   xdebug-cli daemon start --curl "http://localhost/app.php" --commands "break app.php:42"
+
+   # ✓ Good: absolute path
+   xdebug-cli daemon start --curl "http://localhost/app.php" --commands "break /var/www/app.php:42"
+   ```
+
+3. **Breakpoint on line that isn't executed:**
+   - Verify the code path is actually executed during the request
+   - Check if the line has executable code (not comments or blank lines)
+   - Set breakpoint on function entry point instead
+
+4. **Post-mortem debugging with log files:**
+   ```bash
+   # Check the log file for timeout details
+   cat /tmp/xdebug-cli-daemon-9003.log
+
+   # Example log entry:
+   # [2025-12-04 10:30:15] Timeout: breakpoint not hit within 30 seconds. Pending: file.php:42
+   ```
+
+**Exit code 124:**
+
+The daemon exits with code 124 (Unix timeout convention) when a breakpoint timeout occurs. This allows scripts to distinguish between timeouts and other errors:
+
+```bash
+#!/bin/bash
+xdebug-cli daemon start --curl "http://localhost/app.php" --commands "break :42"
+exit_code=$?
+
+if [ $exit_code -eq 124 ]; then
+  echo "Breakpoint timeout - consider increasing --breakpoint-timeout"
+  exit 1
+elif [ $exit_code -ne 0 ]; then
+  echo "Other error occurred"
+  exit 1
+fi
+```
+
 ## Development
 
 ```bash
@@ -476,6 +612,27 @@ go test ./...
 # Install with version info
 ./install.sh
 ```
+
+### Spec-to-Documentation Mapping
+
+When updating documentation, use this mapping to verify consistency with specs:
+
+**CLAUDE.md:**
+| Section | Specification |
+|---------|---------------|
+| Available Commands | `cli` spec (Daemon Subcommands, Attach Command) |
+| Debugging Commands | `dbgp` spec (command parsing and execution) |
+| Daemon Workflow | `persistent-sessions` spec (Daemon Mode) |
+| Managing Daemon Sessions | `persistent-sessions` spec (Session Registry) |
+| Error Messages | `cli` spec (error scenarios) |
+| Troubleshooting | `cli` spec (Timeout Exit Feedback) |
+
+**README.md:**
+| Section | Specification |
+|---------|---------------|
+| Usage | `cli` spec (all commands) |
+| Debugging Commands | `dbgp` spec (command table) |
+| Exit Codes | `cli` spec (error handling) |
 
 ## Project Structure
 

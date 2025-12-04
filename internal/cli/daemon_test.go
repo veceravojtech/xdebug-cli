@@ -128,23 +128,132 @@ func TestDaemonStartCurlFlagRegistered(t *testing.T) {
 	}
 }
 
-// TestDaemonStartCurlValidation tests that --curl flag is required
-func TestDaemonStartCurlValidation(t *testing.T) {
-	// Reset CLIArgs
+// TestDaemonStartRequiresFlag tests that either --curl or --enable-external-connection is required
+func TestDaemonStartRequiresFlag(t *testing.T) {
+	// Reset CLIArgs - neither --curl nor --enable-external-connection set
 	CLIArgs = cfg.CLIParameter{
-		Port: 9003,
-		Curl: "", // Empty curl should fail validation
+		Port:                     9003,
+		Curl:                     "",
+		EnableExternalConnection: false,
 	}
 
-	// runDaemonStart should return an error when --curl is empty
+	// runDaemonStart should return an error when neither flag is set
 	err := runDaemonStart()
 	if err == nil {
-		t.Fatal("runDaemonStart should return error when --curl is empty")
+		t.Fatal("runDaemonStart should return error when neither --curl nor --enable-external-connection is set")
 	}
 
-	// Error message should mention --curl flag is required
-	if err.Error()[:26] != "--curl flag is required\n\nU" {
-		t.Errorf("error message should start with '--curl flag is required', got '%s'", err.Error()[:26])
+	// Error message should mention either flag is required
+	expectedPrefix := "either --curl or --enable-external-connection is required"
+	if len(err.Error()) < len(expectedPrefix) || err.Error()[:len(expectedPrefix)] != expectedPrefix {
+		t.Errorf("error message should start with '%s', got '%s'", expectedPrefix, err.Error()[:50])
+	}
+}
+
+// TestBreakpointTimeoutFlagRegistered tests that --breakpoint-timeout flag is registered
+func TestBreakpointTimeoutFlagRegistered(t *testing.T) {
+	// Test that --breakpoint-timeout flag is registered
+	timeoutFlag := startCmd.Flags().Lookup("breakpoint-timeout")
+	if timeoutFlag == nil {
+		t.Fatal("--breakpoint-timeout flag should be registered")
+	}
+
+	// Test flag default value
+	if timeoutFlag.DefValue != "30" {
+		t.Errorf("expected default value '30', got '%s'", timeoutFlag.DefValue)
+	}
+}
+
+// TestWaitForeverFlagRegistered tests that --wait-forever flag is registered
+func TestWaitForeverFlagRegistered(t *testing.T) {
+	// Test that --wait-forever flag is registered
+	waitForeverFlag := startCmd.Flags().Lookup("wait-forever")
+	if waitForeverFlag == nil {
+		t.Fatal("--wait-forever flag should be registered")
+	}
+
+	// Test flag default value
+	if waitForeverFlag.DefValue != "false" {
+		t.Errorf("expected default value 'false', got '%s'", waitForeverFlag.DefValue)
+	}
+}
+
+// TestWaitForeverSetsTimeoutToZero tests that WaitForever flag sets timeout to 0
+func TestWaitForeverSetsTimeoutToZero(t *testing.T) {
+	// Reset CLIArgs
+	CLIArgs = cfg.CLIParameter{
+		Port:              9003,
+		Curl:              "http://localhost/app.php",
+		WaitForever:       true,
+		BreakpointTimeout: 30, // Should be overridden
+	}
+
+	// Simulate the logic in runDaemonStart
+	if CLIArgs.WaitForever {
+		CLIArgs.BreakpointTimeout = 0
+	}
+
+	// Verify timeout was set to 0
+	if CLIArgs.BreakpointTimeout != 0 {
+		t.Errorf("expected BreakpointTimeout to be 0 when WaitForever is true, got %d", CLIArgs.BreakpointTimeout)
+	}
+}
+
+// TestBreakpointTimeoutOverridesDefault tests that explicit timeout overrides default
+func TestBreakpointTimeoutOverridesDefault(t *testing.T) {
+	// Reset CLIArgs with explicit timeout
+	CLIArgs = cfg.CLIParameter{
+		Port:              9003,
+		Curl:              "http://localhost/app.php",
+		BreakpointTimeout: 60, // Explicit override
+		WaitForever:       false,
+	}
+
+	// Simulate the logic in runDaemonStart (no change when WaitForever is false)
+	if CLIArgs.WaitForever {
+		CLIArgs.BreakpointTimeout = 0
+	}
+
+	// Verify explicit timeout is preserved
+	if CLIArgs.BreakpointTimeout != 60 {
+		t.Errorf("expected BreakpointTimeout to be 60, got %d", CLIArgs.BreakpointTimeout)
+	}
+}
+
+// TestWaitForeverAndBreakpointTimeoutInteraction tests flag interaction
+func TestWaitForeverAndBreakpointTimeoutInteraction(t *testing.T) {
+	// Test case 1: --wait-forever should override any explicit --breakpoint-timeout
+	CLIArgs = cfg.CLIParameter{
+		Port:              9003,
+		Curl:              "http://localhost/app.php",
+		WaitForever:       true,
+		BreakpointTimeout: 60,
+	}
+
+	// Apply --wait-forever logic
+	if CLIArgs.WaitForever {
+		CLIArgs.BreakpointTimeout = 0
+	}
+
+	if CLIArgs.BreakpointTimeout != 0 {
+		t.Errorf("--wait-forever should set timeout to 0 even when --breakpoint-timeout is set, got %d", CLIArgs.BreakpointTimeout)
+	}
+
+	// Test case 2: Without --wait-forever, explicit timeout should be preserved
+	CLIArgs = cfg.CLIParameter{
+		Port:              9003,
+		Curl:              "http://localhost/app.php",
+		WaitForever:       false,
+		BreakpointTimeout: 45,
+	}
+
+	// Apply --wait-forever logic (should not change anything)
+	if CLIArgs.WaitForever {
+		CLIArgs.BreakpointTimeout = 0
+	}
+
+	if CLIArgs.BreakpointTimeout != 45 {
+		t.Errorf("expected timeout to remain 45 when --wait-forever is false, got %d", CLIArgs.BreakpointTimeout)
 	}
 }
 

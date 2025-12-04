@@ -18,8 +18,14 @@ The dbgp package SHALL provide a TCP server for accepting Xdebug connections.
 - **THEN** handler is invoked for each incoming connection
 - **AND** each connection runs in its own goroutine
 
+#### Scenario: Server uses SO_REUSEADDR socket option
+- **WHEN** Listen() is called
+- **THEN** the TCP socket is created with SO_REUSEADDR option enabled
+- **AND** the server can bind immediately after a previous server closes
+- **AND** TIME_WAIT state does not prevent rebinding
+
 ### Requirement: Connection Message Framing
-The dbgp package SHALL handle DBGp protocol message framing.
+The dbgp package SHALL handle DBGp protocol message framing with size validation.
 
 #### Scenario: ReadMessage parses DBGp format
 - **WHEN** connection receives data in format "size\0xml\0"
@@ -30,6 +36,21 @@ The dbgp package SHALL handle DBGp protocol message framing.
 #### Scenario: SendMessage writes with null terminator
 - **WHEN** SendMessage("step_into -i 1") is called
 - **THEN** writes "step_into -i 1\0" to socket
+
+#### Scenario: ReadMessage validates size field format
+- **WHEN** size field contains non-digit characters
+- **THEN** returns error with descriptive message showing invalid content
+- **AND** does not attempt to allocate memory based on invalid size
+
+#### Scenario: ReadMessage enforces maximum message size
+- **WHEN** size field value exceeds MaxMessageSize (100MB)
+- **THEN** returns error indicating message too large
+- **AND** prevents memory exhaustion from corrupted size values
+
+#### Scenario: ReadMessage rejects negative sizes
+- **WHEN** size field parses to negative value
+- **THEN** returns error indicating invalid size
+- **AND** does not attempt buffer allocation
 
 ### Requirement: Protocol XML Parsing
 The dbgp package SHALL parse DBGp protocol XML messages.
@@ -94,4 +115,24 @@ The dbgp package SHALL track debugging session state.
 - **WHEN** AddCommand("step") is called
 - **AND** GetLastCommand() is called
 - **THEN** returns ("step", true)
+
+### Requirement: Message Read Timeout
+The dbgp Connection SHALL support timeout-based message reading to prevent indefinite hangs.
+
+#### Scenario: ReadMessageWithTimeout returns within deadline
+- **WHEN** ReadMessageWithTimeout(30s) is called
+- **AND** valid DBGp message arrives within 30 seconds
+- **THEN** returns parsed message
+- **AND** clears the read deadline
+
+#### Scenario: ReadMessageWithTimeout times out
+- **WHEN** ReadMessageWithTimeout(5s) is called
+- **AND** no data arrives within 5 seconds
+- **THEN** returns timeout error
+- **AND** error message indicates read timeout
+
+#### Scenario: Default timeout is 30 seconds
+- **WHEN** connection reads Xdebug response
+- **THEN** applies DefaultMessageTimeout (30 seconds) if no explicit timeout specified
+- **AND** prevents indefinite blocking on unresponsive connections
 

@@ -1,8 +1,10 @@
 package dbgp
 
 import (
+	"context"
 	"fmt"
 	"net"
+	"syscall"
 	"time"
 )
 
@@ -24,7 +26,22 @@ func NewServer(address string, port int) *Server {
 // Listen starts listening for connections on the configured address and port
 func (s *Server) Listen() error {
 	addr := fmt.Sprintf("%s:%d", s.address, s.port)
-	listener, err := net.Listen("tcp", addr)
+
+	// Use ListenConfig with SO_REUSEADDR to allow immediate port reuse
+	lc := net.ListenConfig{
+		Control: func(network, address string, c syscall.RawConn) error {
+			var sockoptErr error
+			err := c.Control(func(fd uintptr) {
+				sockoptErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+			})
+			if err != nil {
+				return err
+			}
+			return sockoptErr
+		},
+	}
+
+	listener, err := lc.Listen(context.Background(), "tcp", addr)
 	if err != nil {
 		return fmt.Errorf("failed to listen on %s: %w", addr, err)
 	}

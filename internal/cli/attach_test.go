@@ -39,6 +39,21 @@ func TestAttachCommandFlags(t *testing.T) {
 		t.Errorf("expected --commands to be stringArray, got %s", commandsFlag.Value.Type())
 	}
 
+	// Verify --retry flag exists
+	retryFlag := attachCmd.Flags().Lookup("retry")
+	if retryFlag == nil {
+		t.Fatal("--retry flag should be registered")
+	}
+
+	if retryFlag.Value.Type() != "int" {
+		t.Errorf("expected --retry to be int, got %s", retryFlag.Value.Type())
+	}
+
+	// Verify default value is DefaultRetryAttempts (3)
+	if retryFlag.DefValue != "3" {
+		t.Errorf("expected --retry default to be 3, got %s", retryFlag.DefValue)
+	}
+
 	// Verify --json flag is available (inherited from root)
 	jsonFlag := attachCmd.InheritedFlags().Lookup("json")
 	if jsonFlag == nil {

@@ -5,8 +5,24 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"regexp"
 	"strconv"
 	"strings"
+	"time"
+)
+
+const (
+	// MaxMessageSize is the maximum allowed DBGp message size (100MB)
+	// This prevents memory exhaustion from corrupted size values
+	MaxMessageSize = 100 * 1024 * 1024
+
+	// DefaultMessageTimeout is the default timeout for reading DBGp messages
+	DefaultMessageTimeout = 30 * time.Second
+)
+
+var (
+	// digitsOnlyRegex validates that the size field contains only digits
+	digitsOnlyRegex = regexp.MustCompile(`^\d+$`)
 )
 
 // Connection wraps a network connection and handles DBGp message framing
@@ -25,6 +41,23 @@ func NewConnection(conn net.Conn) *Connection {
 
 // ReadMessage reads a DBGp message with the format: size\0xml\0
 func (c *Connection) ReadMessage() (string, error) {
+	return c.ReadMessageWithTimeout(DefaultMessageTimeout)
+}
+
+// ReadMessageWithTimeout reads a DBGp message with a timeout
+// The timeout is enforced by setting a read deadline on the underlying connection
+func (c *Connection) ReadMessageWithTimeout(timeout time.Duration) (string, error) {
+	// Set read deadline
+	if err := c.conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		return "", fmt.Errorf("failed to set read deadline: %w", err)
+	}
+
+	// Ensure deadline is cleared after read (success or failure)
+	defer func() {
+		// Clear the deadline by setting it to zero value
+		_ = c.conn.SetReadDeadline(time.Time{})
+	}()
+
 	// Read the size part (up to first null byte)
 	sizeBytes, err := c.reader.ReadBytes(0)
 	if err != nil {
@@ -33,9 +66,34 @@ func (c *Connection) ReadMessage() (string, error) {
 
 	// Remove the null terminator
 	sizeStr := strings.TrimSuffix(string(sizeBytes), "\x00")
+
+	// Validate size field format (digits only) before parsing
+	if !digitsOnlyRegex.MatchString(sizeStr) {
+		// Show first 50 bytes of invalid size field for debugging
+		preview := sizeStr
+		if len(preview) > 50 {
+			preview = preview[:50] + "..."
+		}
+		return "", fmt.Errorf("invalid message size field (expected digits only): '%s'", preview)
+	}
+
 	size, err := strconv.Atoi(sizeStr)
 	if err != nil {
-		return "", fmt.Errorf("invalid message size '%s': %w", sizeStr, err)
+		// Should not happen after regex validation, but keep for safety
+		preview := sizeStr
+		if len(preview) > 50 {
+			preview = preview[:50] + "..."
+		}
+		return "", fmt.Errorf("invalid message size '%s': %w", preview, err)
+	}
+
+	// Validate size bounds
+	if size < 0 {
+		return "", fmt.Errorf("invalid message size: negative value %d", size)
+	}
+	if size > MaxMessageSize {
+		return "", fmt.Errorf("message size %d exceeds maximum allowed size of %d bytes (%.1f MB)",
+			size, MaxMessageSize, float64(MaxMessageSize)/(1024*1024))
 	}
 
 	// Read the XML content (exactly 'size' bytes)

@@ -31,4 +31,13 @@ type CLIParameter struct {
 
 	// BreakpointTimeout is the timeout in seconds for breakpoint validation (0 = disabled)
 	BreakpointTimeout int
+
+	// WaitForever disables breakpoint timeout (sets BreakpointTimeout to 0)
+	WaitForever bool
+
+	// EnableExternalConnection allows daemon to start without --curl, waiting for external Xdebug trigger
+	EnableExternalConnection bool
+
+	// RetryAttempts is the number of connection retry attempts for attach command
+	RetryAttempts int
 }

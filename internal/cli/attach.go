@@ -44,6 +44,7 @@ Examples:
 
 func init() {
 	attachCmd.Flags().StringArrayVar(&CLIArgs.Commands, "commands", []string{}, "Commands to execute")
+	attachCmd.Flags().IntVar(&CLIArgs.RetryAttempts, "retry", ipc.DefaultRetryAttempts, "Number of connection retry attempts (with exponential backoff)")
 	rootCmd.AddCommand(attachCmd)
 }
 
@@ -71,8 +72,8 @@ func runAttachCmd() error {
 	// Create IPC client
 	client := ipc.NewClient(sessionInfo.SocketPath)
 
-	// Send commands to daemon
-	response, err := client.SendCommands(CLIArgs.Commands, CLIArgs.JSON)
+	// Send commands to daemon with retry logic
+	response, err := client.SendCommandsWithRetry(CLIArgs.Commands, CLIArgs.JSON, CLIArgs.RetryAttempts)
 	if err != nil {
 		return fmt.Errorf("failed to connect to daemon socket: %s\nThe daemon may have crashed or ended.", sessionInfo.SocketPath)
 	}

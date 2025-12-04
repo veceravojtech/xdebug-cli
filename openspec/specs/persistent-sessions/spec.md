@@ -42,7 +42,7 @@ The CLI SHALL run all debug sessions as background daemons. Daemon mode is now t
 - **AND** daemon exits gracefully
 
 ### Requirement: IPC Communication
-The CLI SHALL provide Unix socket-based IPC for communicating with daemon sessions.
+The CLI SHALL provide Unix socket-based IPC for communicating with daemon sessions with automatic retry.
 
 #### Scenario: Create IPC socket
 - **WHEN** daemon starts
@@ -68,6 +68,18 @@ The CLI SHALL provide Unix socket-based IPC for communicating with daemon sessio
 - **THEN** request contains command list and output format flag
 - **AND** response contains success status and result array
 - **AND** each result includes command name, success flag, and data
+
+#### Scenario: Client retries on transient connection failure
+- **WHEN** initial connection attempt fails
+- **THEN** client retries with exponential backoff (100ms, 200ms, 400ms)
+- **AND** makes up to 3 attempts by default
+- **AND** returns error only after all attempts exhausted
+
+#### Scenario: Client connects immediately when daemon ready
+- **WHEN** daemon socket is accepting connections
+- **AND** client attempts to connect
+- **THEN** connection succeeds on first attempt
+- **AND** no unnecessary delay is introduced
 
 ### Requirement: Attach Command
 The CLI SHALL provide an attach command to execute commands against running daemon sessions.
@@ -97,7 +109,7 @@ The CLI SHALL provide an attach command to execute commands against running daem
 - **AND** exits with non-zero status
 
 ### Requirement: Session Registry
-The CLI SHALL maintain a registry of active daemon sessions.
+The CLI SHALL maintain a registry of active daemon sessions with crash recovery.
 
 #### Scenario: Register new session
 - **WHEN** daemon starts
@@ -114,13 +126,22 @@ The CLI SHALL maintain a registry of active daemon sessions.
 - **WHEN** daemon starts
 - **OR** connection command queries sessions
 - **THEN** validates each registry entry process exists
+- **AND** validates process is xdebug-cli (not recycled PID)
 - **AND** removes entries for non-existent processes
+- **AND** removes entries for recycled PIDs running different executables
 - **AND** removes stale PID and socket files
 
 #### Scenario: Find session by port
 - **WHEN** attach command needs to connect
 - **THEN** reads registry to find session on specified port
 - **AND** uses socket path from registry entry
+
+#### Scenario: Validate process identity
+- **WHEN** registry contains entry with PID 12345
+- **AND** process 12345 exists but is not xdebug-cli
+- **THEN** entry is considered stale
+- **AND** entry is removed during cleanup
+- **AND** associated socket and PID files are removed
 
 ### Requirement: Enhanced Connection Commands
 The CLI connection commands SHALL support daemon session management.
@@ -160,4 +181,31 @@ The CLI connection commands SHALL support daemon session management.
 - **AND** iterates through all active sessions and terminates them
 - **AND** displays count of sessions terminated
 - **AND** supports `--force` flag to skip confirmation prompt
+
+### Requirement: Breakpoint Path History
+The CLI SHALL persist successfully used breakpoint paths across daemon sessions to provide suggestions when non-absolute paths fail.
+
+#### Scenario: Store path on successful breakpoint hit
+- **WHEN** breakpoint at `/var/www/app/File.php:100` is hit successfully
+- **THEN** path is stored in persistent history file `~/.xdebug-cli/breakpoint-paths.json`
+- **AND** mapping is: filename `File.php` -> full path `/var/www/app/File.php`
+
+#### Scenario: Lookup path by filename
+- **WHEN** path lookup is requested for filename `File.php`
+- **AND** history has stored path for `File.php`
+- **THEN** returns the stored full path `/var/www/app/File.php`
+
+#### Scenario: No stored path for filename
+- **WHEN** path lookup is requested for filename `Unknown.php`
+- **AND** no stored path exists for that filename
+- **THEN** returns empty string
+
+#### Scenario: Path history persists across sessions
+- **WHEN** daemon session ends
+- **AND** new daemon session starts later
+- **THEN** previous breakpoint paths are still available for suggestions
+
+#### Scenario: Multiple paths for same filename
+- **WHEN** different full paths exist for same filename (e.g., `/app1/File.php` and `/app2/File.php`)
+- **THEN** most recently used path is stored and suggested
 

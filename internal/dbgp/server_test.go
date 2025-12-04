@@ -217,3 +217,76 @@ func TestServer_MultipleConnections(t *testing.T) {
 		t.Errorf("Expected 3 connections, got %d", finalCount)
 	}
 }
+
+func TestServer_ImmediateRebind(t *testing.T) {
+	// Pick a specific port to test rebinding
+	port := 19003 // Use a non-standard port to avoid conflicts
+
+	// First server: bind, close
+	server1 := NewServer("127.0.0.1", port)
+	err := server1.Listen()
+	if err != nil {
+		t.Fatalf("Failed to start first server: %v", err)
+	}
+
+	// Verify server1 is listening
+	if !server1.IsListening() {
+		t.Fatal("Expected first server to be listening")
+	}
+
+	// Close the server immediately
+	err = server1.Close()
+	if err != nil {
+		t.Fatalf("Failed to close first server: %v", err)
+	}
+
+	// Second server: attempt immediate rebind
+	// Without SO_REUSEADDR, this would fail with "address already in use"
+	server2 := NewServer("127.0.0.1", port)
+	err = server2.Listen()
+	if err != nil {
+		t.Fatalf("Failed to rebind immediately after close: %v", err)
+	}
+	defer server2.Close()
+
+	// Verify server2 is listening
+	if !server2.IsListening() {
+		t.Fatal("Expected second server to be listening")
+	}
+
+	// Verify we can accept connections on the rebound port
+	addr := server2.listener.Addr().(*net.TCPAddr)
+	if addr.Port != port {
+		t.Errorf("Expected port %d, got %d", port, addr.Port)
+	}
+
+	// Test that we can actually connect to the rebound server
+	var wg sync.WaitGroup
+	var connReceived bool
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		server2.Accept(func(conn *Connection) {
+			connReceived = true
+			conn.Close()
+			server2.Close()
+		})
+	}()
+
+	// Give the server time to start accepting
+	time.Sleep(50 * time.Millisecond)
+
+	// Connect to verify the server is functional
+	conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Fatalf("Failed to connect to rebound server: %v", err)
+	}
+	conn.Close()
+
+	wg.Wait()
+
+	if !connReceived {
+		t.Error("Expected connection to be received by rebound server")
+	}
+}

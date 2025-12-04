@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/console/xdebug-cli/internal/daemon"
@@ -51,17 +52,23 @@ This is the primary entry point for all debugging sessions. The daemon runs
 in the background and keeps your debug session alive, allowing you to execute
 multiple commands via 'attach' without losing the connection.
 
-REQUIRED FLAGS:
-  --curl    Curl arguments to trigger Xdebug connection
+REQUIRED (one of):
+  --curl                       Curl arguments to trigger Xdebug connection
+  --enable-external-connection Wait for external Xdebug trigger (browser, IDE, manual)
 
 Features:
 - Automatically kills any existing daemon on the same port
 - Listens on 0.0.0.0:9003 by default (all interfaces)
 - Supports initial breakpoint/command setup via --commands flag
 - Port can be changed with -p/--port flag
-- Auto-appends XDEBUG_TRIGGER cookie to curl command
+- Auto-appends XDEBUG_TRIGGER cookie to curl command (when using --curl)
 
-Example workflow:
+Breakpoint timeout options:
+- Default 30-second timeout handles slow PHP bootstrap (opcache, frameworks)
+- Use --wait-forever for cold starts or when breakpoint timing is unpredictable
+- Use --breakpoint-timeout N to set a custom timeout in seconds (0 = disabled)
+
+Example workflow with curl trigger:
   # 1. Start daemon with curl trigger
   xdebug-cli daemon start --curl "http://localhost/app.php"
 
@@ -73,10 +80,26 @@ Example workflow:
   # 3. Stop the daemon when done
   xdebug-cli daemon kill
 
+Example workflow with external trigger:
+  # 1. Start daemon waiting for external connection (--commands required)
+  xdebug-cli daemon start --enable-external-connection --commands "break /app/file.php:42"
+
+  # 2. Trigger PHP from browser/IDE/manual curl with XDEBUG_TRIGGER
+
+  # 3. Interact with the session
+  xdebug-cli attach --commands "context local"
+  xdebug-cli attach --commands "run"
+
+  # 4. Stop the daemon when done
+  xdebug-cli daemon kill
+
 Additional examples:
   xdebug-cli daemon start --curl "http://localhost/app.php"
   xdebug-cli daemon start --curl "http://localhost/app.php" -p 9004
-  xdebug-cli daemon start --curl "http://localhost/api -X POST -d 'data'" --commands "break :42"`,
+  xdebug-cli daemon start --curl "http://localhost/api -X POST -d 'data'" --commands "break :42"
+  xdebug-cli daemon start --enable-external-connection --commands "break /app/file.php:42"
+  xdebug-cli daemon start --enable-external-connection -p 9004 --commands "break :100"
+  xdebug-cli daemon start --curl "http://localhost/app.php" --wait-forever --commands "break :42"`,
 	Run: func(cmd *cobra.Command, args []string) {
 		if err := runDaemonStart(); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -156,9 +179,11 @@ func init() {
 	daemonCmd.AddCommand(isAliveCmd)
 
 	// Add flags to start subcommand
-	startCmd.Flags().StringVar(&CLIArgs.Curl, "curl", "", "Curl arguments to trigger Xdebug connection (required)")
+	startCmd.Flags().StringVar(&CLIArgs.Curl, "curl", "", "Curl arguments to trigger Xdebug connection")
+	startCmd.Flags().BoolVar(&CLIArgs.EnableExternalConnection, "enable-external-connection", false, "Wait for external Xdebug connection (bypasses --curl requirement)")
 	startCmd.Flags().StringArrayVar(&CLIArgs.Commands, "commands", []string{}, "Commands to execute when connection established (optional)")
-	startCmd.Flags().IntVar(&CLIArgs.BreakpointTimeout, "breakpoint-timeout", 10, "Timeout in seconds to wait for breakpoint hit (0 = disabled)")
+	startCmd.Flags().IntVar(&CLIArgs.BreakpointTimeout, "breakpoint-timeout", 30, "Timeout in seconds to wait for breakpoint hit (0 = disabled, default handles slow bootstrap)")
+	startCmd.Flags().BoolVar(&CLIArgs.WaitForever, "wait-forever", false, "Disable breakpoint timeout (wait indefinitely, useful for cold starts)")
 
 	// Add flags to list subcommand
 	listCmd.Flags().BoolVar(&CLIArgs.JSON, "json", false, "Output in JSON format")
@@ -252,25 +277,39 @@ func killAllDaemonsSilent() {
 
 // runDaemonStart handles the daemon start command execution
 func runDaemonStart() error {
-	// Validate --curl flag is provided
-	if CLIArgs.Curl == "" {
-		return fmt.Errorf(`--curl flag is required
+	// Apply --wait-forever flag (sets breakpoint timeout to 0)
+	if CLIArgs.WaitForever {
+		CLIArgs.BreakpointTimeout = 0
+	}
+
+	// Validate that either --curl or --enable-external-connection is provided
+	if CLIArgs.Curl == "" && !CLIArgs.EnableExternalConnection {
+		return fmt.Errorf(`either --curl or --enable-external-connection is required
 
 Usage:
   xdebug-cli daemon start --curl "<curl-args>"
+  xdebug-cli daemon start --enable-external-connection --commands "break :42"
 
 Examples:
   xdebug-cli daemon start --curl "http://localhost/app.php"
   xdebug-cli daemon start --curl "http://localhost/api -X POST -d 'data'"
-  xdebug-cli daemon start --curl "http://localhost/app.php" --commands "break :42"
+  xdebug-cli daemon start --enable-external-connection --commands "break /app/file.php:42"
 
-The --curl flag specifies the HTTP request to trigger Xdebug.
-XDEBUG_TRIGGER cookie is added automatically.`)
+Use --curl to trigger Xdebug via HTTP request (XDEBUG_TRIGGER cookie added automatically).
+Use --enable-external-connection to wait for external triggers (browser, IDE, manual).`)
 	}
 
-	// Verify curl binary exists in PATH
-	if _, err := exec.LookPath("curl"); err != nil {
-		return fmt.Errorf("curl not found in PATH")
+	// Verify curl binary exists in PATH (only if --curl is used)
+	if CLIArgs.Curl != "" {
+		if _, err := exec.LookPath("curl"); err != nil {
+			return fmt.Errorf("curl not found in PATH")
+		}
+	}
+
+	// Clean up stale registry entries (crashed/killed daemons)
+	registry, err := daemon.NewSessionRegistry()
+	if err == nil {
+		registry.CleanupStaleEntries()
 	}
 
 	// Auto-kill all existing daemons before starting
@@ -480,18 +519,38 @@ func runDaemonProcess(d *daemon.Daemon, server *dbgp.Server) error {
 						// Timeout expired - check status one more time
 						statusResp, err := client.Status()
 						if err != nil || statusResp.Status != "break" {
-							errorMsg := fmt.Sprintf("Breakpoint at '%s' was not hit within %d seconds.", nonAbsPath, CLIArgs.BreakpointTimeout)
+							// Build list of pending breakpoints
+							pendingBreakpoints := nonAbsPath
+
+							// Write timeout warning to stderr
+							fmt.Fprintf(os.Stderr, "\nWarning: breakpoint not hit within %d seconds\n", CLIArgs.BreakpointTimeout)
+							fmt.Fprintf(os.Stderr, "Pending breakpoints: %s\n", pendingBreakpoints)
+							fmt.Fprintf(os.Stderr, "\nTroubleshooting:\n")
+							fmt.Fprintf(os.Stderr, "  - Increase timeout: --breakpoint-timeout 60\n")
+							fmt.Fprintf(os.Stderr, "  - Wait indefinitely: --wait-forever\n")
 							if suggestedPath != "" {
 								lineNum := ""
 								if strings.Contains(nonAbsPath, ":") {
 									lineNum = ":" + strings.Split(nonAbsPath, ":")[1]
 								}
-								errorMsg += fmt.Sprintf("\nUse full path: %s%s", suggestedPath, lineNum)
+								fmt.Fprintf(os.Stderr, "  - Use absolute path: %s%s\n", suggestedPath, lineNum)
 							} else {
-								errorMsg += "\nEnsure you use an absolute path (starting with /)."
+								fmt.Fprintf(os.Stderr, "  - Ensure breakpoint uses absolute path (starting with /)\n")
 							}
-							daemonErr = fmt.Errorf("%s", errorMsg)
-							return
+							fmt.Fprintln(os.Stderr, "")
+
+							// Write timeout event to log file
+							logFilePath := fmt.Sprintf("/tmp/xdebug-cli-daemon-%d.log", CLIArgs.Port)
+							logEntry := fmt.Sprintf("[%s] Timeout: breakpoint not hit within %d seconds. Pending: %s\n",
+								time.Now().Format("2006-01-02 15:04:05"), CLIArgs.BreakpointTimeout, pendingBreakpoints)
+							if logFile, err := os.OpenFile(logFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+								logFile.WriteString(logEntry)
+								logFile.Close()
+							}
+
+							// Exit with code 124 (Unix timeout convention)
+							d.Shutdown()
+							os.Exit(124)
 						}
 						// Breakpoint was hit in time
 						currentFile, _ := client.GetSession().GetCurrentLocation()
@@ -855,14 +914,30 @@ func runDaemonKill() {
 			fmt.Printf("Sending kill request to daemon (PID %d)...\n", sessionInfo.PID)
 
 			resp, err := client.Kill()
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Failed to send kill request to daemon: %v\n", err)
-				fmt.Fprintf(os.Stderr, "The daemon process (PID %d) may need to be killed manually.\n", sessionInfo.PID)
-				os.Exit(1)
-			}
-
-			if !resp.Success {
-				fmt.Fprintf(os.Stderr, "Kill request failed: %s\n", resp.Error)
+			if err != nil || !resp.Success {
+				// Socket communication failed - try SIGTERM as fallback
+				if processExists(sessionInfo.PID) {
+					proc, procErr := os.FindProcess(sessionInfo.PID)
+					if procErr == nil {
+						if sigErr := proc.Signal(syscall.SIGTERM); sigErr == nil {
+							// Give process time to terminate
+							time.Sleep(100 * time.Millisecond)
+							if !processExists(sessionInfo.PID) {
+								// Clean up registry entry
+								registry.Remove(sessionInfo.Port)
+								// Clean up socket file if it exists
+								os.Remove(sessionInfo.SocketPath)
+								fmt.Println("Daemon terminated successfully (via SIGTERM).")
+								return
+							}
+						}
+					}
+				}
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Failed to send kill request to daemon: %v\n", err)
+				} else {
+					fmt.Fprintf(os.Stderr, "Kill request failed: %s\n", resp.Error)
+				}
 				fmt.Fprintf(os.Stderr, "The daemon process (PID %d) may need to be killed manually.\n", sessionInfo.PID)
 				os.Exit(1)
 			}
@@ -969,6 +1044,25 @@ func runDaemonKillAll() {
 		resp, err := client.Kill()
 
 		if err != nil || !resp.Success {
+			// Socket communication failed - try SIGTERM as fallback
+			if processExists(session.PID) {
+				proc, procErr := os.FindProcess(session.PID)
+				if procErr == nil {
+					if sigErr := proc.Signal(syscall.SIGTERM); sigErr == nil {
+						// Give process time to terminate
+						time.Sleep(100 * time.Millisecond)
+						if !processExists(session.PID) {
+							fmt.Println("done (via SIGTERM)")
+							// Clean up registry entry
+							registry.Remove(session.Port)
+							// Clean up socket file if it exists
+							os.Remove(session.SocketPath)
+							successCount++
+							continue
+						}
+					}
+				}
+			}
 			fmt.Println("failed")
 			failedSessions = append(failedSessions, session)
 			if err != nil {

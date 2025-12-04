@@ -318,3 +318,204 @@ func TestProcessExists(t *testing.T) {
 		t.Error("processExists() = true for non-existent PID")
 	}
 }
+
+func TestValidateProcess(t *testing.T) {
+	// Current process should be valid (it's xdebug-cli running tests)
+	if !validateProcess(os.Getpid()) {
+		t.Error("validateProcess() = false for current xdebug-cli process")
+	}
+
+	// Non-existent PID should be invalid
+	if validateProcess(999999) {
+		t.Error("validateProcess() = true for non-existent PID")
+	}
+}
+
+func TestValidateProcess_RecycledPID(t *testing.T) {
+	// Test that validateProcess correctly identifies non-xdebug-cli processes
+	// We'll use PID 1 (init/systemd) as a known non-xdebug-cli process
+	if validateProcess(1) {
+		t.Error("validateProcess() = true for init process (PID 1), expected false")
+	}
+}
+
+func TestCleanupStaleEntries_NonExistentProcess(t *testing.T) {
+	tempDir := t.TempDir()
+	os.Setenv("HOME", tempDir)
+	defer os.Unsetenv("HOME")
+
+	registry, err := NewSessionRegistry()
+	if err != nil {
+		t.Fatalf("NewSessionRegistry() error = %v", err)
+	}
+
+	// Add session with current PID (exists and is xdebug-cli)
+	validSession := SessionInfo{
+		PID:        os.Getpid(),
+		Port:       9003,
+		SocketPath: "/tmp/valid.sock",
+		StartedAt:  time.Now(),
+	}
+	registry.Add(validSession)
+
+	// Add session with non-existent PID
+	staleSession := SessionInfo{
+		PID:        999999, // Very unlikely to exist
+		Port:       9004,
+		SocketPath: "/tmp/stale.sock",
+		StartedAt:  time.Now(),
+	}
+	registry.Add(staleSession)
+
+	// Call CleanupStaleEntries
+	if err := registry.CleanupStaleEntries(); err != nil {
+		t.Fatalf("CleanupStaleEntries() error = %v", err)
+	}
+
+	// Valid session should still exist
+	if _, err := registry.Get(9003); err != nil {
+		t.Errorf("Valid session was removed: %v", err)
+	}
+
+	// Stale session should be removed
+	if _, err := registry.Get(9004); err == nil {
+		t.Error("Stale session was not removed")
+	}
+}
+
+func TestCleanupStaleEntries_RecycledPID(t *testing.T) {
+	tempDir := t.TempDir()
+	os.Setenv("HOME", tempDir)
+	defer os.Unsetenv("HOME")
+
+	registry, err := NewSessionRegistry()
+	if err != nil {
+		t.Fatalf("NewSessionRegistry() error = %v", err)
+	}
+
+	// Add session with current PID (exists and is xdebug-cli)
+	validSession := SessionInfo{
+		PID:        os.Getpid(),
+		Port:       9003,
+		SocketPath: "/tmp/valid.sock",
+		StartedAt:  time.Now(),
+	}
+	registry.Add(validSession)
+
+	// Add session with PID 1 (init/systemd - exists but is NOT xdebug-cli)
+	// This simulates a recycled PID
+	recycledSession := SessionInfo{
+		PID:        1,
+		Port:       9004,
+		SocketPath: "/tmp/recycled.sock",
+		StartedAt:  time.Now(),
+	}
+	registry.Add(recycledSession)
+
+	// Call CleanupStaleEntries
+	if err := registry.CleanupStaleEntries(); err != nil {
+		t.Fatalf("CleanupStaleEntries() error = %v", err)
+	}
+
+	// Valid session should still exist
+	if _, err := registry.Get(9003); err != nil {
+		t.Errorf("Valid session was removed: %v", err)
+	}
+
+	// Recycled PID session should be removed
+	if _, err := registry.Get(9004); err == nil {
+		t.Error("Recycled PID session was not removed")
+	}
+}
+
+func TestCleanupStaleEntries_PreservesValidEntries(t *testing.T) {
+	tempDir := t.TempDir()
+	os.Setenv("HOME", tempDir)
+	defer os.Unsetenv("HOME")
+
+	registry, err := NewSessionRegistry()
+	if err != nil {
+		t.Fatalf("NewSessionRegistry() error = %v", err)
+	}
+
+	// Add multiple valid sessions (all with current PID)
+	session1 := SessionInfo{
+		PID:        os.Getpid(),
+		Port:       9003,
+		SocketPath: "/tmp/session1.sock",
+		StartedAt:  time.Now(),
+	}
+	session2 := SessionInfo{
+		PID:        os.Getpid(),
+		Port:       9004,
+		SocketPath: "/tmp/session2.sock",
+		StartedAt:  time.Now(),
+	}
+	registry.Add(session1)
+	registry.Add(session2)
+
+	// Call CleanupStaleEntries
+	if err := registry.CleanupStaleEntries(); err != nil {
+		t.Fatalf("CleanupStaleEntries() error = %v", err)
+	}
+
+	// Both sessions should still exist
+	if _, err := registry.Get(9003); err != nil {
+		t.Errorf("Session 1 was removed: %v", err)
+	}
+	if _, err := registry.Get(9004); err != nil {
+		t.Errorf("Session 2 was removed: %v", err)
+	}
+
+	// List should have 2 entries
+	sessions := registry.List()
+	if len(sessions) != 2 {
+		t.Errorf("List() length = %d, want 2", len(sessions))
+	}
+}
+
+func TestCleanupStaleEntries_OrphanedSocketFiles(t *testing.T) {
+	tempDir := t.TempDir()
+	os.Setenv("HOME", tempDir)
+	defer os.Unsetenv("HOME")
+
+	registry, err := NewSessionRegistry()
+	if err != nil {
+		t.Fatalf("NewSessionRegistry() error = %v", err)
+	}
+
+	// Create a socket file
+	socketPath := filepath.Join(tempDir, "orphaned.sock")
+	if err := os.WriteFile(socketPath, []byte("test"), 0600); err != nil {
+		t.Fatalf("Failed to create socket file: %v", err)
+	}
+
+	// Add session with non-existent PID and the socket path
+	staleSession := SessionInfo{
+		PID:        999999,
+		Port:       9004,
+		SocketPath: socketPath,
+		StartedAt:  time.Now(),
+	}
+	registry.Add(staleSession)
+
+	// Verify socket file exists before cleanup
+	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
+		t.Fatal("Socket file should exist before cleanup")
+	}
+
+	// Call CleanupStaleEntries
+	if err := registry.CleanupStaleEntries(); err != nil {
+		t.Fatalf("CleanupStaleEntries() error = %v", err)
+	}
+
+	// Socket file should be removed
+	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
+		t.Error("Orphaned socket file was not removed")
+	}
+
+	// Stale session should be removed from registry
+	if _, err := registry.Get(9004); err == nil {
+		t.Error("Stale session was not removed from registry")
+	}
+}
