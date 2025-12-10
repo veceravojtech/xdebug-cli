@@ -118,6 +118,11 @@ func (c *Connection) ReadMessageWithTimeout(timeout time.Duration) (string, erro
 
 // SendMessage sends a DBGp command message with null terminator
 func (c *Connection) SendMessage(message string) error {
+	// Disable Nagle's algorithm for immediate delivery (critical for debugging)
+	if tcpConn, ok := c.conn.(*net.TCPConn); ok {
+		_ = tcpConn.SetNoDelay(true)
+	}
+
 	// DBGp commands are sent with a null terminator
 	data := []byte(message + "\x00")
 	_, err := c.conn.Write(data)

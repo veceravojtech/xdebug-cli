@@ -2,7 +2,8 @@
 # Simple Daemon Test - Exact workflow
 
 # Install latest version
-/home/console/PhpstormProjects/CLI/xdebug-cli/install.sh
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+"$SCRIPT_DIR/../../install.sh"
 
 BREAKPOINT="booking/application/modules/default/models/Controller/Action/Helper/AllowedTabs.php:144"
 CURL_URL="http://booking.previo.loc/coupon/index/select/?hotId=731541&currency=CZK&lang=cs&redirectType=iframe&showTabs=stay-hotels&PHPSESSID=8fc0edd2942ff8140966ecee51c6114c&helpCampaign=0"

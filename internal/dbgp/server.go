@@ -4,6 +4,10 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os/exec"
+	"regexp"
+	"runtime"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -146,4 +150,192 @@ func (s *Server) GetAddress() string {
 // IsListening returns true if the server is currently listening
 func (s *Server) IsListening() bool {
 	return s.listener != nil
+}
+
+// PortConflictInfo contains information about a process using a port
+type PortConflictInfo struct {
+	Port        int
+	ProcessName string
+	PID         string
+	IsIDE       bool
+}
+
+// CheckPortConflict checks if another process is listening on the port
+// Returns nil if the port is free, or PortConflictInfo if occupied
+func (s *Server) CheckPortConflict() *PortConflictInfo {
+	return CheckPortInUse(s.port)
+}
+
+// CheckPortInUse checks if a port is in use by another process
+func CheckPortInUse(port int) *PortConflictInfo {
+	// Try to connect to the port - if successful, something is listening
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+	if err != nil {
+		// Connection refused means port is free
+		return nil
+	}
+	conn.Close()
+
+	// Port is in use, try to identify the process
+	info := &PortConflictInfo{Port: port}
+	identifyProcessOnPort(port, info)
+
+	return info
+}
+
+// identifyProcessOnPort uses lsof to identify the process using a port
+func identifyProcessOnPort(port int, info *PortConflictInfo) {
+	if runtime.GOOS == "windows" {
+		// Windows: use netstat
+		identifyProcessWindows(port, info)
+		return
+	}
+
+	// macOS/Linux: use lsof
+	cmd := exec.Command("lsof", "-i", fmt.Sprintf(":%d", port), "-sTCP:LISTEN", "-n", "-P")
+	output, err := cmd.Output()
+	if err != nil {
+		info.ProcessName = "unknown process"
+		return
+	}
+
+	parseLosfOutput(string(output), info)
+}
+
+// parseLosfOutput extracts process info from lsof output
+func parseLosfOutput(output string, info *PortConflictInfo) {
+	lines := strings.Split(output, "\n")
+	if len(lines) < 2 {
+		info.ProcessName = "unknown process"
+		return
+	}
+
+	// Parse the data line (skip header)
+	// Example: phpstorm 68135 vecera  735u  IPv6 0xc869... TCP *:9003 (LISTEN)
+	fields := strings.Fields(lines[1])
+	if len(fields) >= 2 {
+		info.ProcessName = fields[0]
+		info.PID = fields[1]
+	} else {
+		info.ProcessName = "unknown process"
+		return
+	}
+
+	// Check if it's a known IDE
+	checkIfIDE(info)
+}
+
+// identifyProcessWindows uses netstat on Windows
+func identifyProcessWindows(port int, info *PortConflictInfo) {
+	cmd := exec.Command("netstat", "-ano")
+	output, err := cmd.Output()
+	if err != nil {
+		info.ProcessName = "unknown process"
+		return
+	}
+
+	// Find the line with our port
+	portStr := fmt.Sprintf(":%d", port)
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		if strings.Contains(line, portStr) && strings.Contains(line, "LISTENING") {
+			fields := strings.Fields(line)
+			if len(fields) >= 5 {
+				info.PID = fields[4]
+				// Try to get process name from PID
+				info.ProcessName = getProcessNameWindows(info.PID)
+			}
+			break
+		}
+	}
+
+	if info.ProcessName == "" {
+		info.ProcessName = "unknown process"
+	}
+	checkIfIDE(info)
+}
+
+// getProcessNameWindows gets process name from PID on Windows
+func getProcessNameWindows(pid string) string {
+	cmd := exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %s", pid), "/FO", "CSV", "/NH")
+	output, err := cmd.Output()
+	if err != nil {
+		return "unknown"
+	}
+	// Parse CSV: "process.exe","12345",...
+	re := regexp.MustCompile(`"([^"]+)"`)
+	matches := re.FindStringSubmatch(string(output))
+	if len(matches) >= 2 {
+		return strings.TrimSuffix(matches[1], ".exe")
+	}
+	return "unknown"
+}
+
+// checkIfIDE checks if the process is a known IDE debugger
+func checkIfIDE(info *PortConflictInfo) {
+	name := strings.ToLower(info.ProcessName)
+
+	// Known IDE process names
+	ideNames := []string{
+		"phpstorm",
+		"idea",          // IntelliJ IDEA
+		"webstorm",
+		"pycharm",
+		"goland",
+		"rubymine",
+		"clion",
+		"rider",
+		"datagrip",
+		"code",          // VS Code
+		"vscodium",
+		"eclipse",
+		"netbeans",
+		"sublime",
+		"atom",
+		"java",          // Eclipse/Java debuggers
+	}
+
+	for _, ide := range ideNames {
+		if strings.Contains(name, ide) {
+			info.IsIDE = true
+			return
+		}
+	}
+}
+
+// FormatPortConflictError creates a user-friendly error message for port conflicts
+func FormatPortConflictError(info *PortConflictInfo) string {
+	if info == nil {
+		return ""
+	}
+
+	var msg strings.Builder
+	msg.WriteString(fmt.Sprintf("Error: port %d is already in use", info.Port))
+
+	if info.ProcessName != "" && info.ProcessName != "unknown process" {
+		msg.WriteString(fmt.Sprintf(" by %s", info.ProcessName))
+		if info.PID != "" {
+			msg.WriteString(fmt.Sprintf(" (PID %s)", info.PID))
+		}
+	}
+	msg.WriteString("\n")
+
+	if info.IsIDE {
+		msg.WriteString("\nAnother debugger is listening on this port.\n")
+		msg.WriteString("Xdebug connections will go to that debugger instead of xdebug-cli.\n\n")
+
+		switch strings.ToLower(info.ProcessName) {
+		case "phpstorm":
+			msg.WriteString("To fix: In PhpStorm, click the phone icon in the toolbar to stop listening,\n")
+			msg.WriteString("        or go to Run > Stop Listening for PHP Debug Connections\n")
+		default:
+			msg.WriteString("To fix: Stop the debug listener in your IDE, then retry.\n")
+		}
+	} else {
+		msg.WriteString("\nTo fix: Stop the process using the port, or use a different port:\n")
+		msg.WriteString(fmt.Sprintf("        xdebug-cli daemon start -p %d ...\n", info.Port+1))
+	}
+
+	return msg.String()
 }

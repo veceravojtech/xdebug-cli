@@ -39,6 +39,9 @@ type ProtocolResponse struct {
 	Filename      string               `xml:"filename,attr"`
 	Lineno        string               `xml:"lineno,attr"`
 	Source        string               `xml:",chardata"`
+	// feature_get response fields
+	FeatureName string `xml:"feature_name,attr"`
+	Supported   string `xml:"supported,attr"`
 }
 
 // ProtocolError represents an error in a response

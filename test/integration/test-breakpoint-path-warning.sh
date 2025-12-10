@@ -2,6 +2,11 @@
 # Integration Test: Breakpoint path warning validation
 # Tests that non-absolute breakpoint paths show warnings and fail-fast behavior
 
+# Use gtimeout on macOS if timeout is not available
+if ! command -v timeout &> /dev/null && command -v gtimeout &> /dev/null; then
+    timeout() { gtimeout "$@"; }
+fi
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'

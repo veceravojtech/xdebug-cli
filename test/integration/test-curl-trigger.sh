@@ -34,7 +34,7 @@ echo
 # Test 1: Missing --curl flag should show error
 echo "Test 1: Missing --curl flag shows error"
 OUTPUT=$(xdebug-cli daemon start 2>&1 || true)
-if echo "$OUTPUT" | grep -q "\-\-curl flag is required"; then
+if echo "$OUTPUT" | grep -q "either --curl or --enable-external-connection is required"; then
     pass "Missing --curl flag shows proper error message"
 else
     fail "Missing --curl flag should show error message"

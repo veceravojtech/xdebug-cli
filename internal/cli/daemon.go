@@ -326,6 +326,11 @@ Use --enable-external-connection to wait for external triggers (browser, IDE, ma
 		}
 	}
 
+	// Check for port conflicts with other debuggers (IDE listeners)
+	if conflict := dbgp.CheckPortInUse(CLIArgs.Port); conflict != nil {
+		return fmt.Errorf("%s", dbgp.FormatPortConflictError(conflict))
+	}
+
 	// Clean up stale registry entries (crashed/killed daemons)
 	registry, err := daemon.NewSessionRegistry()
 	if err == nil {
@@ -345,38 +350,6 @@ func forkDaemon() error {
 	d, err := daemon.NewDaemon(nil, CLIArgs.Port)
 	if err != nil {
 		return fmt.Errorf("failed to create daemon: %w", err)
-	}
-
-	// Check for non-absolute breakpoint paths and show warning BEFORE forking
-	// (child process has stderr redirected to log file)
-	hasNonAbsolute, nonAbsPath := daemon.HasNonAbsoluteBreakpoint(CLIArgs.Commands)
-	if hasNonAbsolute {
-		pathStore, err := daemon.NewBreakpointPathStore()
-		var suggestedPath string
-		if err == nil {
-			// Extract just the filename part for lookup
-			filename := nonAbsPath
-			if strings.Contains(nonAbsPath, ":") {
-				filename = strings.Split(nonAbsPath, ":")[0]
-			}
-			suggestedPath = pathStore.LoadBreakpointPath(filename)
-		}
-
-		// Show warning
-		fmt.Fprintf(os.Stderr, "Warning: breakpoint path '%s' is not absolute.\n", nonAbsPath)
-		if suggestedPath != "" {
-			// Extract line number from original path
-			lineNum := ""
-			if strings.Contains(nonAbsPath, ":") {
-				lineNum = ":" + strings.Split(nonAbsPath, ":")[1]
-			}
-			fmt.Fprintf(os.Stderr, "Suggestion: use '%s%s' instead.\n", suggestedPath, lineNum)
-		}
-		fmt.Fprintf(os.Stderr, "Xdebug requires absolute paths for breakpoints.\n")
-		if CLIArgs.BreakpointTimeout > 0 {
-			fmt.Fprintf(os.Stderr, "Will wait %d seconds for breakpoint hit, then fail if not hit.\n", CLIArgs.BreakpointTimeout)
-		}
-		fmt.Fprintln(os.Stderr, "")
 	}
 
 	// Clean up any old status file before forking
@@ -432,8 +405,41 @@ func forkDaemon() error {
 			time.Sleep(100 * time.Millisecond)
 		}
 
-		// Timeout waiting for daemon status
-		fmt.Fprintf(os.Stderr, "Timeout waiting for daemon status\n")
+		// Timeout waiting for daemon status - provide detailed info
+		fmt.Fprintf(os.Stderr, "Timeout waiting for daemon status after %d seconds\n", CLIArgs.BreakpointTimeout)
+
+		// Show pending breakpoint commands
+		fmt.Fprintf(os.Stderr, "\nPending breakpoint commands:\n")
+		for _, cmd := range CLIArgs.Commands {
+			if strings.HasPrefix(cmd, "break ") || strings.HasPrefix(cmd, "b ") {
+				fmt.Fprintf(os.Stderr, "  - %s\n", cmd)
+			}
+		}
+
+		// Check log file for more info
+		logFile := fmt.Sprintf("/tmp/xdebug-cli-daemon-%d.log", CLIArgs.Port)
+		if logContent, err := os.ReadFile(logFile); err == nil {
+			lines := strings.Split(string(logContent), "\n")
+			// Show last few relevant lines
+			fmt.Fprintf(os.Stderr, "\nDaemon log (%s):\n", logFile)
+			start := 0
+			if len(lines) > 20 {
+				start = len(lines) - 20
+			}
+			for i := start; i < len(lines); i++ {
+				if lines[i] != "" {
+					fmt.Fprintf(os.Stderr, "  %s\n", lines[i])
+				}
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "\nLog file: %s (not found or unreadable)\n", logFile)
+		}
+
+		fmt.Fprintf(os.Stderr, "\nPossible causes:\n")
+		fmt.Fprintf(os.Stderr, "  - Xdebug not connecting (check PHP xdebug.client_host/port)\n")
+		fmt.Fprintf(os.Stderr, "  - Breakpoint path not matching (use absolute paths)\n")
+		fmt.Fprintf(os.Stderr, "  - Code path not executed during request\n")
+		fmt.Fprintf(os.Stderr, "  - Use --wait-forever to disable timeout\n")
 		os.Exit(124)
 	}
 
@@ -442,13 +448,24 @@ func forkDaemon() error {
 	return nil
 }
 
+// logDaemon writes timestamped log entries to stderr (which goes to the log file)
+func logDaemon(format string, args ...interface{}) {
+	timestamp := time.Now().Format("2006-01-02 15:04:05")
+	msg := fmt.Sprintf(format, args...)
+	fmt.Fprintf(os.Stderr, "[%s] %s\n", timestamp, msg)
+}
+
 // runDaemonProcess runs the daemon logic in the child process
 func runDaemonProcess(d *daemon.Daemon, server *dbgp.Server) error {
+	logDaemon("Daemon process started on port %d", CLIArgs.Port)
+
 	// Initialize daemon infrastructure (PID, registry, IPC server) before waiting for connection
 	// This allows 'attach' commands to connect even before the first Xdebug connection
 	if err := d.Initialize(); err != nil {
+		logDaemon("Failed to initialize daemon: %v", err)
 		return fmt.Errorf("failed to initialize daemon: %w", err)
 	}
+	logDaemon("Daemon initialized successfully")
 
 	// Check for non-absolute breakpoint paths (warning already shown in parent process)
 	hasNonAbsolute, nonAbsPath := daemon.HasNonAbsoluteBreakpoint(CLIArgs.Commands)
@@ -471,27 +488,45 @@ func runDaemonProcess(d *daemon.Daemon, server *dbgp.Server) error {
 	// Execute curl to trigger Xdebug connection (CLIArgs.Curl is passed via command line)
 	var curlErrCh <-chan error
 	if CLIArgs.Curl != "" {
+		logDaemon("Executing curl: %s", CLIArgs.Curl)
 		curlErrCh = executeCurl(CLIArgs.Curl)
 
 		// Monitor curl for errors in background - terminate daemon if curl fails
 		go func() {
 			if err := <-curlErrCh; err != nil {
+				logDaemon("Curl failed: %v", err)
 				fmt.Fprintf(os.Stderr, "Error: %v\nDaemon terminated.\n", err)
 				d.Shutdown()
 				os.Exit(1)
 			}
+			logDaemon("Curl completed successfully")
 		}()
+	} else {
+		logDaemon("No curl specified, waiting for external Xdebug connection")
 	}
+
+	logDaemon("Waiting for Xdebug connection on port %d...", CLIArgs.Port)
 
 	// Accept first connection (blocking)
 	var daemonErr error
 	err := server.Accept(func(conn *dbgp.Connection) {
+		logDaemon("Xdebug connection accepted")
+
 		// Create client and initialize
 		client := dbgp.NewClient(conn)
 		_, err := client.Init()
 		if err != nil {
+			logDaemon("Failed to initialize session: %v", err)
 			daemonErr = fmt.Errorf("failed to initialize session: %w", err)
 			return
+		}
+		logDaemon("Session initialized successfully")
+
+		// Check Xdebug configuration for potential issues
+		warnings := client.CheckXdebugConfig()
+		for _, warning := range warnings {
+			logDaemon("Warning: %s", warning.Issue)
+			logDaemon("Fix: %s", warning.FixCommand)
 		}
 
 		// Update global session state
@@ -501,8 +536,9 @@ func runDaemonProcess(d *daemon.Daemon, server *dbgp.Server) error {
 		// Set the client for the daemon (now that connection is established)
 		d.SetClient(client)
 
-		// Execute initial commands if provided
+		// Execute initial commands if provided, otherwise step_into to pause at first line
 		if len(CLIArgs.Commands) > 0 {
+			logDaemon("Executing %d initial command(s): %v", len(CLIArgs.Commands), CLIArgs.Commands)
 			executor := daemon.NewCommandExecutor(client)
 
 			// Check if any command sets a breakpoint and collect breakpoint locations
@@ -535,11 +571,53 @@ func runDaemonProcess(d *daemon.Daemon, server *dbgp.Server) error {
 				timeoutCh = time.After(time.Duration(CLIArgs.BreakpointTimeout) * time.Second)
 			}
 
+			logDaemon("Executing commands: %v", commandsToExecute)
 			results := executor.ExecuteCommands(commandsToExecute, CLIArgs.JSON)
+			logDaemon("Commands executed, %d result(s)", len(results))
 
 			// Check for command failures
 			for _, result := range results {
 				if !result.Success {
+					logDaemon("Command '%s' failed: %v", result.Command, result.Error)
+
+					// If 'run' command failed with EOF, it means Xdebug disconnected
+					// This can happen due to:
+					// 1. Breakpoint path doesn't match and script completes
+					// 2. xdebug.output_dir doesn't exist (trace mode crash)
+					// 3. PHP fatal error
+					if (result.Command == "run" || result.Command == "r" ||
+						result.Command == "step" || result.Command == "s" ||
+						result.Command == "step_into" || result.Command == "into" ||
+						result.Command == "next" || result.Command == "n") &&
+						strings.Contains(result.Error, "EOF") {
+						var errorMsg string
+						if hasBreakpoint {
+							breakpointStr := strings.Join(breakpointLocations, ", ")
+							errorMsg = fmt.Sprintf("Xdebug disconnected (EOF). Breakpoint at '%s' was not hit.", breakpointStr)
+							if hasNonAbsolute {
+								if suggestedPath != "" {
+									lineNum := ""
+									if strings.Contains(nonAbsPath, ":") {
+										lineNum = ":" + strings.Split(nonAbsPath, ":")[1]
+									}
+									errorMsg += fmt.Sprintf(" Use full path: %s%s", suggestedPath, lineNum)
+								} else {
+									errorMsg += " Ensure you use an absolute path (starting with /)."
+								}
+							}
+						} else {
+							errorMsg = "Xdebug disconnected (EOF) during command execution."
+						}
+						errorMsg += "\n\nPossible causes:\n"
+						errorMsg += "  - Breakpoint location not reached during script execution\n"
+						errorMsg += "  - xdebug.output_dir missing (if mode=trace): mkdir -p /tmp/profile && chmod 777 /tmp/profile\n"
+						errorMsg += "  - PHP fatal error or exception\n"
+						errorMsg += "  - Check Xdebug log: docker exec <container> cat /tmp/xdebug.log"
+						d.WriteStatus("error:" + errorMsg)
+						d.Shutdown()
+						os.Exit(1)
+					}
+
 					daemonErr = fmt.Errorf("command '%s' failed", result.Command)
 					return
 				}
@@ -548,11 +626,14 @@ func runDaemonProcess(d *daemon.Daemon, server *dbgp.Server) error {
 			// After run command, check if we hit a breakpoint (validate for ALL breakpoints)
 			if hasBreakpoint && CLIArgs.BreakpointTimeout > 0 {
 				// Check the status - if we're in "break" status, the breakpoint was hit
+				logDaemon("Checking status after breakpoint commands...")
 				statusResp, err := client.Status()
 				if err != nil {
+					logDaemon("Failed to get status: %v", err)
 					daemonErr = fmt.Errorf("failed to get status: %w", err)
 					return
 				}
+				logDaemon("Status: %s, Reason: %s", statusResp.Status, statusResp.Reason)
 
 				// Build breakpoint location string for error messages
 				breakpointStr := strings.Join(breakpointLocations, ", ")
@@ -622,6 +703,17 @@ func runDaemonProcess(d *daemon.Daemon, server *dbgp.Server) error {
 					}
 				}
 			}
+		} else {
+			// No initial commands - send step_into to pause at first line
+			// This prevents Xdebug from timing out and continuing execution
+			logDaemon("No initial commands, sending step_into to pause at first line")
+			_, err := client.Step()
+			if err != nil {
+				logDaemon("Failed to step_into: %v", err)
+				// Don't fail - session is still usable
+			} else {
+				logDaemon("Paused at first line, ready for attach commands")
+			}
 		}
 
 		// Wait for daemon shutdown
@@ -668,10 +760,18 @@ func getActiveSession() (*dbgp.Client, bool) {
 
 // processExists checks if a process with the given PID exists
 func processExists(pid int) bool {
-	// Check if /proc/<pid> exists (Linux-specific)
-	procPath := fmt.Sprintf("/proc/%d", pid)
-	_, err := os.Stat(procPath)
-	return err == nil
+	// Use kill with signal 0 to check if process exists (works on Linux and macOS)
+	// Signal 0 doesn't actually send a signal, just checks if process exists
+	err := syscall.Kill(pid, 0)
+	if err == nil {
+		return true
+	}
+	// EPERM means process exists but we don't have permission to signal it
+	if err == syscall.EPERM {
+		return true
+	}
+	// ESRCH means process doesn't exist
+	return false
 }
 
 // findStaleProcessOnPort checks if there's a stale xdebug-cli process on the given port

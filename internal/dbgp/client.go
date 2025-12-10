@@ -22,6 +22,7 @@ func NewClient(conn *Connection) *Client {
 }
 
 // Init reads the initial protocol message and sets up the session
+// It also sends feature_set commands immediately to configure Xdebug and keep the connection alive
 func (c *Client) Init() (*ProtocolInit, error) {
 	// Read the init message
 	xmlData, err := c.conn.ReadMessage()
@@ -541,6 +542,50 @@ func (c *Client) GetSource(fileURI string, beginLine, endLine int) (*ProtocolRes
 // GetSession returns the session object
 func (c *Client) GetSession() *Session {
 	return c.session
+}
+
+// FeatureGet retrieves the value of an Xdebug feature/setting
+func (c *Client) FeatureGet(featureName string) (*ProtocolResponse, error) {
+	txID := c.session.NextTransactionIDInt()
+	command := fmt.Sprintf("feature_get -i %d -n %s", txID, featureName)
+	c.session.AddCommand(strconv.Itoa(txID), "feature_get")
+
+	err := c.conn.SendMessage(command)
+	if err != nil {
+		return nil, err
+	}
+
+	return c.conn.GetResponse()
+}
+
+// XdebugConfigWarning represents a potential configuration issue
+type XdebugConfigWarning struct {
+	Issue      string
+	FixCommand string
+}
+
+// CheckXdebugConfig queries Xdebug settings and returns warnings about potential issues
+// This helps detect problems like missing trace directories before they cause cryptic errors
+func (c *Client) CheckXdebugConfig() []XdebugConfigWarning {
+	var warnings []XdebugConfigWarning
+
+	// Try to get output_dir for trace/profile
+	// The feature_get response puts the value in the Source field (CDATA)
+	// Note: output_dir may not be supported by all Xdebug versions via feature_get
+	outputDirResp, err := c.FeatureGet("output_dir")
+	if err == nil && outputDirResp.Supported == "1" {
+		outputDir := strings.TrimSpace(outputDirResp.Source)
+		// Warn if using a non-standard directory that may not exist
+		// Common issue: xdebug.mode includes 'trace' but output directory doesn't exist
+		if outputDir != "" && outputDir != "/tmp" && strings.HasPrefix(outputDir, "/") {
+			warnings = append(warnings, XdebugConfigWarning{
+				Issue:      fmt.Sprintf("Xdebug output_dir '%s' may not exist (causes EOF errors if xdebug.mode includes trace/profile)", outputDir),
+				FixCommand: fmt.Sprintf("docker exec <container> mkdir -p %s && chmod 777 %s", outputDir, outputDir),
+			})
+		}
+	}
+
+	return warnings
 }
 
 // Close closes the connection

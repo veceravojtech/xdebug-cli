@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -187,30 +189,66 @@ func (r *SessionRegistry) CleanupStaleEntries() error {
 
 // validateProcess checks if a process with the given PID exists and is xdebug-cli
 func validateProcess(pid int) bool {
-	// Check if /proc/<pid> exists (Linux-specific)
-	procPath := fmt.Sprintf("/proc/%d", pid)
-	if _, err := os.Stat(procPath); err != nil {
+	// First check if process exists using cross-platform method
+	if !processExists(pid) {
 		return false
 	}
 
-	// Verify process is xdebug-cli by checking /proc/<pid>/comm
-	commPath := fmt.Sprintf("/proc/%d/comm", pid)
-	commData, err := os.ReadFile(commPath)
+	// Try Linux-specific /proc method first
+	procPath := fmt.Sprintf("/proc/%d", pid)
+	if _, err := os.Stat(procPath); err == nil {
+		// Linux: verify process is xdebug-cli by checking /proc/<pid>/comm
+		commPath := fmt.Sprintf("/proc/%d/comm", pid)
+		commData, err := os.ReadFile(commPath)
+		if err != nil {
+			return false
+		}
+
+		// comm contains the executable name, usually with a trailing newline
+		// For xdebug-cli, it will be "xdebug-cli\n"
+		// For test binaries, it will be "daemon.test\n", "cli.test\n", etc.
+		comm := string(commData)
+
+		// Check if it starts with "xdebug-cli" (the actual binary)
+		if len(comm) >= 10 && comm[0:10] == "xdebug-cli" {
+			return true
+		}
+		// Check for test binaries - any .test suffix
+		if len(comm) >= 6 && comm[len(comm)-6:len(comm)-1] == ".test" {
+			return true
+		}
+
+		return false
+	}
+
+	// macOS/BSD: /proc doesn't exist, use ps command to verify process name
+	// This is more expensive but only runs on non-Linux systems
+	return validateProcessWithPS(pid)
+}
+
+// validateProcessWithPS uses ps command to check if PID is xdebug-cli (for macOS/BSD)
+func validateProcessWithPS(pid int) bool {
+	cmd := exec.Command("ps", "-p", fmt.Sprintf("%d", pid), "-o", "comm=")
+	output, err := cmd.Output()
 	if err != nil {
 		return false
 	}
 
-	// comm contains the executable name, usually with a trailing newline
-	// For xdebug-cli, it will be "xdebug-cli\n"
-	// For test binaries, it will be "daemon.test\n", "cli.test\n", etc.
-	comm := string(commData)
+	comm := string(output)
+	// Remove trailing newline
+	if len(comm) > 0 && comm[len(comm)-1] == '\n' {
+		comm = comm[:len(comm)-1]
+	}
 
-	// Check if it starts with "xdebug-cli" (the actual binary)
-	if len(comm) >= 10 && comm[0:10] == "xdebug-cli" {
+	// Extract basename (ps may return "./xdebug-cli" or full path)
+	baseName := filepath.Base(comm)
+
+	// Check if it's xdebug-cli or a test binary
+	if baseName == "xdebug-cli" {
 		return true
 	}
-	// Check for test binaries - any .test suffix
-	if len(comm) >= 6 && comm[len(comm)-6:len(comm)-1] == ".test" {
+	// Check for test binaries (e.g., "daemon.test", "cli.test")
+	if len(baseName) > 5 && baseName[len(baseName)-5:] == ".test" {
 		return true
 	}
 
@@ -220,10 +258,18 @@ func validateProcess(pid int) bool {
 // processExists checks if a process with the given PID exists
 // NOTE: This is less strict than validateProcess - it only checks existence
 func processExists(pid int) bool {
-	// Check if /proc/<pid> exists (Linux-specific)
-	procPath := fmt.Sprintf("/proc/%d", pid)
-	_, err := os.Stat(procPath)
-	return err == nil
+	// Use kill with signal 0 to check if process exists (works on Linux and macOS)
+	// Signal 0 doesn't actually send a signal, just checks if process exists
+	err := syscall.Kill(pid, 0)
+	if err == nil {
+		return true
+	}
+	// EPERM means process exists but we don't have permission to signal it
+	if err == syscall.EPERM {
+		return true
+	}
+	// ESRCH means process doesn't exist
+	return false
 }
 
 // Path returns the registry file path

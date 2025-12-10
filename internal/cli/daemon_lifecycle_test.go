@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"os"
 	"testing"
 
 	"github.com/console/xdebug-cli/internal/dbgp"
@@ -186,9 +187,9 @@ func TestDaemonKillFlags(t *testing.T) {
 
 func TestProcessExists(t *testing.T) {
 	// Test with current process (should exist)
-	currentPID := 1 // PID 1 should always exist on Linux (init/systemd)
+	currentPID := os.Getpid() // Use current process PID (works on Linux and macOS)
 	if !processExists(currentPID) {
-		t.Error("PID 1 should exist on Linux systems")
+		t.Errorf("current process PID %d should exist", currentPID)
 	}
 
 	// Test with invalid PID (should not exist)
