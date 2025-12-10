@@ -12,6 +12,24 @@ import (
 	"github.com/console/xdebug-cli/internal/view"
 )
 
+// expandCommands splits semicolon-separated commands in each element and returns
+// a flattened slice. This enables syntax like "step; step; print $x" in a single
+// --commands argument while maintaining backwards compatibility with array-style
+// commands like --commands "step" "step" "print $x".
+func expandCommands(commands []string) []string {
+	var expanded []string
+	for _, cmdGroup := range commands {
+		parts := strings.Split(cmdGroup, ";")
+		for _, part := range parts {
+			trimmed := strings.TrimSpace(part)
+			if trimmed != "" {
+				expanded = append(expanded, trimmed)
+			}
+		}
+	}
+	return expanded
+}
+
 // CommandExecutor executes debug commands and returns structured results
 type CommandExecutor struct {
 	client     *dbgp.Client
@@ -31,6 +49,9 @@ func NewCommandExecutor(client *dbgp.Client) *CommandExecutor {
 func (e *CommandExecutor) ExecuteCommands(commands []string, jsonOutput bool) []ipc.CommandResult {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
+	// Expand semicolon-separated commands before execution
+	commands = expandCommands(commands)
 
 	e.jsonOutput = jsonOutput
 	results := make([]ipc.CommandResult, 0, len(commands))
@@ -124,8 +145,8 @@ func (e *CommandExecutor) executeCommand(command string, args []string) ipc.Comm
 // isSessionEndingCommand checks if a command ends the session
 func (e *CommandExecutor) isSessionEndingCommand(command string) bool {
 	return command == "finish" || command == "f" ||
-	       command == "detach" || command == "d" ||
-	       command == "quit" || command == "q"
+		command == "detach" || command == "d" ||
+		command == "quit" || command == "q"
 }
 
 // handleRun continues execution to next breakpoint

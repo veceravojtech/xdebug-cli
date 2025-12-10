@@ -68,9 +68,11 @@ func (m *mockConn) Write(b []byte) (n int, err error) {
 	return m.writeBuf.Write(b)
 }
 
-func (m *mockConn) Close() error                       { return nil }
-func (m *mockConn) LocalAddr() net.Addr                { return &net.TCPAddr{} }
-func (m *mockConn) RemoteAddr() net.Addr               { return &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9003} }
+func (m *mockConn) Close() error        { return nil }
+func (m *mockConn) LocalAddr() net.Addr { return &net.TCPAddr{} }
+func (m *mockConn) RemoteAddr() net.Addr {
+	return &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9003}
+}
 func (m *mockConn) SetDeadline(t time.Time) error      { return nil }
 func (m *mockConn) SetReadDeadline(t time.Time) error  { return nil }
 func (m *mockConn) SetWriteDeadline(t time.Time) error { return nil }
@@ -315,4 +317,86 @@ func TestClear(t *testing.T) {
 		}
 		// Command should execute (success depends on mock matching breakpoint location)
 	})
+}
+
+// TestExpandCommands tests the semicolon command separator expansion
+func TestExpandCommands(t *testing.T) {
+	testCases := []struct {
+		name     string
+		input    []string
+		expected []string
+	}{
+		{
+			name:     "single command no semicolon",
+			input:    []string{"step"},
+			expected: []string{"step"},
+		},
+		{
+			name:     "semicolon separated commands",
+			input:    []string{"step; step; step"},
+			expected: []string{"step", "step", "step"},
+		},
+		{
+			name:     "semicolon with extra whitespace",
+			input:    []string{"  step  ;  print $x  ;  run  "},
+			expected: []string{"step", "print $x", "run"},
+		},
+		{
+			name:     "empty segments filtered",
+			input:    []string{"step;;run"},
+			expected: []string{"step", "run"},
+		},
+		{
+			name:     "trailing semicolon",
+			input:    []string{"step;"},
+			expected: []string{"step"},
+		},
+		{
+			name:     "leading semicolon",
+			input:    []string{";step"},
+			expected: []string{"step"},
+		},
+		{
+			name:     "array style still works",
+			input:    []string{"step", "step", "step"},
+			expected: []string{"step", "step", "step"},
+		},
+		{
+			name:     "mixed array and semicolon",
+			input:    []string{"step; step", "run"},
+			expected: []string{"step", "step", "run"},
+		},
+		{
+			name:     "complex commands with arguments",
+			input:    []string{"break :42; run; print $myVar"},
+			expected: []string{"break :42", "run", "print $myVar"},
+		},
+		{
+			name:     "empty input",
+			input:    []string{},
+			expected: []string(nil),
+		},
+		{
+			name:     "only whitespace and semicolons",
+			input:    []string{" ; ; "},
+			expected: []string(nil),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := expandCommands(tc.input)
+
+			if len(result) != len(tc.expected) {
+				t.Errorf("Expected %d commands, got %d: %v", len(tc.expected), len(result), result)
+				return
+			}
+
+			for i, cmd := range result {
+				if cmd != tc.expected[i] {
+					t.Errorf("Command %d: expected '%s', got '%s'", i, tc.expected[i], cmd)
+				}
+			}
+		})
+	}
 }

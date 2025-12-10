@@ -17,3 +17,13 @@ xdebug-cli
 # OS files
 .DS_Store
 Thumbs.db
+
+_bmad/
+_bmad/*
+_bmad-output/
+_bmad-output/*
+.claude
+.claude/*
+.tmux-cli
+.tmux-session
+scripts/hooks/*

@@ -116,6 +116,16 @@ Available commands for use with `--commands` flag:
 | `finish` | `f` | Stop debugging |
 | `help` | `h`, `?` | Show help |
 
+### Command Separator
+
+Use semicolons to separate multiple commands in a single `--commands` string:
+
+```bash
+xdebug-cli attach --commands "step; step; step"
+xdebug-cli attach --commands "break :42; run; print \$x"
+xdebug-cli attach --commands "step; step" "run"  # Mixed styles
+```
+
 ### Breakpoint Syntax
 
 ```bash
