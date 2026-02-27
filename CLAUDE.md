@@ -7,6 +7,7 @@
 * Multiple breakpoints in single command
 * Source code display with line numbers
 * JSON output mode for automation and scripting
+* MCP server for AI assistant integration (Claude Code, Claude Desktop)
 * TDD with comprehensive test coverage
 * Install command (`xdebug-cli install`) installs CLI to `~/.local/bin` with build timestamp
 
@@ -21,6 +22,7 @@ xdebug-cli daemon list [--json]                          # List all daemon sessi
 xdebug-cli daemon isAlive                                # Check if daemon active (exit 0/1)
 xdebug-cli daemon kill                                   # Terminate active daemon
 xdebug-cli daemon kill --all [--force]                   # Terminate all daemon sessions
+xdebug-cli mcp                                           # Start MCP server (stdio JSON-RPC)
 xdebug-cli install                                       # Install binary to ~/.local/bin
 xdebug-cli version                                       # Show version and build timestamp
 ```
@@ -476,6 +478,57 @@ xdebug-cli attach --commands "run"
 xdebug-cli daemon kill
 ```
 
+## MCP Server
+
+The `xdebug-cli mcp` command starts an MCP (Model Context Protocol) server over stdio JSON-RPC, allowing AI assistants to interact with debugging sessions programmatically.
+
+### Configuration
+
+**Claude Code (`.mcp.json`):**
+```json
+{
+  "mcpServers": {
+    "xdebug-cli": {
+      "command": "xdebug-cli",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+**Claude Desktop (`claude_desktop_config.json`):**
+```json
+{
+  "mcpServers": {
+    "xdebug-cli": {
+      "command": "/path/to/xdebug-cli",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+### MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `xdebug_daemon_start` | Start a debug daemon session. Either `curl` or `enable_external_connection` is required. |
+| `xdebug_daemon_kill` | Kill daemon session(s). Use `all=true` to kill all sessions. |
+| `xdebug_daemon_status` | Get status of the daemon on the specified port. |
+| `xdebug_daemon_list` | List all active daemon sessions with their PID, port, and socket path. |
+| `xdebug_daemon_is_alive` | Check if a daemon is running on the specified port. |
+| `xdebug_execute` | Execute debug commands on a running daemon session. |
+
+### Example Tool Call Flow
+
+```bash
+# AI assistant calls these MCP tools in sequence:
+# 1. xdebug_daemon_start(curl: "http://localhost/app.php", commands: ["break /var/www/app.php:42"])
+# 2. xdebug_execute(commands: ["context local"])
+# 3. xdebug_execute(commands: ["print $user", "run"])
+# 4. xdebug_daemon_kill()
+```
+
 ## Error Messages
 
 **Missing required flag:**
@@ -622,6 +675,7 @@ When updating documentation, use this mapping to verify consistency with specs:
 | Managing Daemon Sessions | `persistent-sessions` spec (Session Registry) |
 | Error Messages | `cli` spec (error scenarios) |
 | Troubleshooting | `cli` spec (Timeout Exit Feedback) |
+| MCP Server | `mcp-server` tech-spec (MCP tools, configuration) |
 
 **README.md:**
 | Section | Specification |
@@ -634,7 +688,8 @@ When updating documentation, use this mapping to verify consistency with specs:
 
 ```
 cmd/xdebug-cli/main.go     # Entry point
-internal/cli/              # Cobra commands (root, daemon, attach, connection, install)
+internal/cli/              # Cobra commands (root, daemon, attach, mcp, connection, install)
+internal/mcpserver/        # MCP server (tools, exec helper, JSON-RPC over stdio)
 internal/dbgp/             # DBGp protocol layer (server, client, session, protocol)
 internal/daemon/           # Daemon process management (fork, IPC, registry)
 internal/ipc/              # Inter-process communication (Unix sockets, protocol)

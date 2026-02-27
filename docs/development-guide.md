@@ -27,7 +27,7 @@ The `install.sh` script:
 2. Downloads dependencies (`go mod download`)
 3. Builds with ldflags for version injection:
    ```
-   -X github.com/console/xdebug-cli/internal/cli.Version={VERSION}
+   -X github.com/console/xdebug-cli/internal/cfg.Version={VERSION}
    -X github.com/console/xdebug-cli/internal/cli.BuildTime={BUILD_TIME}
    ```
 4. Installs to `~/.local/bin/xdebug-cli`

@@ -10,7 +10,7 @@ NC='\033[0m'
 
 INSTALL_DIR="${HOME}/.local/bin"
 BINARY_NAME="xdebug-cli"
-VERSION="1.0.1"
+VERSION="1.0.2"
 BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S')
 
 echo -e "${GREEN}=== Xdebug CLI Installation ===${NC}"
@@ -31,7 +31,7 @@ echo -e "${YELLOW}Downloading dependencies...${NC}"
 go mod download
 
 echo -e "${YELLOW}Building ${BINARY_NAME} v${VERSION}...${NC}"
-LDFLAGS="-X github.com/console/xdebug-cli/internal/cli.Version=${VERSION} -X github.com/console/xdebug-cli/internal/cli.BuildTime=${BUILD_TIME}"
+LDFLAGS="-X github.com/console/xdebug-cli/internal/cfg.Version=${VERSION} -X github.com/console/xdebug-cli/internal/cli.BuildTime=${BUILD_TIME}"
 go build -ldflags "${LDFLAGS}" -o "${BINARY_NAME}" ./cmd/xdebug-cli
 
 if [ ! -f "${BINARY_NAME}" ]; then

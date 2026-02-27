@@ -1,7 +1,8 @@
 package cfg
 
-// Version is the current version of the xdebug-cli application
-const Version = "1.0.2"
+// Version is the current version of the xdebug-cli application.
+// Set via ldflags at build time: -X github.com/console/xdebug-cli/internal/cfg.Version=x.y.z
+var Version = "1.0.2"
 
 // CLIParameter contains the command-line parameters for the Xdebug CLI
 type CLIParameter struct {

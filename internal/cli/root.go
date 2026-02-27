@@ -9,8 +9,6 @@ import (
 )
 
 var (
-	// Version is set via ldflags
-	Version = "dev"
 	// BuildTime is set via ldflags
 	BuildTime = "unknown"
 )
@@ -36,7 +34,7 @@ func init() {
 	// Add global flags
 	rootCmd.PersistentFlags().StringVarP(&CLIArgs.Host, "host", "l", "0.0.0.0", "Host address to listen on for Xdebug connections")
 	rootCmd.PersistentFlags().IntVarP(&CLIArgs.Port, "port", "p", 9003, "Port number to listen on for Xdebug connections")
-	rootCmd.PersistentFlags().BoolVar(&CLIArgs.JSON, "json", true, "Output results in JSON format")
+	rootCmd.PersistentFlags().BoolVar(&CLIArgs.JSON, "json", false, "Output results in JSON format")
 
 	rootCmd.AddCommand(versionCmd)
 }
